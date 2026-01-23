@@ -33,6 +33,10 @@ def verify_password(password: str, stored: str) -> bool:
         return hmac.compare_digest(got, expected)
     except Exception:
         return False
+
+# ------------------------------
+# BREAK GLASS (token-gated)
+# ------------------------------
 def reset_admin_password_to_default():
     # Reads from secrets; never hard-code the token in your repo.
     token_expected = st.secrets.get("admin_reset", {}).get("token")
@@ -46,7 +50,7 @@ def reset_admin_password_to_default():
     st.caption("This will set the 'admin' password back to the default and re-activate the account.")
 
     entered = st.text_input("Reset token", type="password", key="admin_reset_token_entered")
-    if st.button("Reset admin password", type="primary", use_container_width=True):
+    if st.button("Reset admin password", type="primary", width="stretch"):
         if entered != token_expected:
             st.error("Invalid reset token.")
             return
@@ -62,42 +66,9 @@ def reset_admin_password_to_default():
         )
         st.success("Admin password reset. You can now log in with the default password.")
 
-#------------------------------
-# BREAK GLASS
-#------------------------------
-def reset_admin_password_to_default():
-    # Reads from secrets; never hard-code the token in your repo.
-    token_expected = st.secrets.get("admin_reset", {}).get("token")
-    default_pw = st.secrets.get("admin_reset", {}).get("default_password", "admin123")
-
-    if not token_expected:
-        st.error("Admin reset is not configured (missing admin_reset.token in Secrets).")
-        return
-
-    st.subheader("Emergency admin reset")
-    st.caption("This will set the 'admin' password back to the default and re-activate the account.")
-
-    entered = st.text_input("Reset token", type="password", key="admin_reset_token_entered")
-    if st.button("Reset admin password", type="primary", use_container_width=True):
-        if entered != token_expected:
-            st.error("Invalid reset token.")
-            return
-
-        row = fetch_one("SELECT id FROM users WHERE username=?", ("admin",))
-        if not row:
-            st.error("No 'admin' user found in the database.")
-            return
-
-        execute(
-            "UPDATE users SET password_hash=?, active=1 WHERE username=?",
-            (hash_password(default_pw), "admin")
-        )
-        st.success("Admin password reset. You can now log in with the default password.")
-#----------------------------------------------
 # ---------------------------
-# Database
+# Branding: theme-aware sidebar logo
 # ---------------------------
-
 LOGO_LIGHT_URL = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
 LOGO_DARK_URL  = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
 
@@ -112,8 +83,11 @@ def render_sidebar_logo():
     logo = LOGO_DARK_URL if theme_type == "dark" else LOGO_LIGHT_URL
 
     with st.sidebar:
-        st.image(logo, use_container_width=True)
+        st.image(logo, width="stretch")
 
+# ---------------------------
+# Database
+# ---------------------------
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -278,70 +252,13 @@ def get_available_qty(item_id: int) -> int:
     outstanding = get_outstanding_by_item().get(item_id, 0)
     return max(total - outstanding, 0)
 
-#----------------------------
-# BORROWER RECEIPT
-#----------------------------
-
-def build_receipt_pdf(borrower_name: str, borrower_email: str, rows: list[sqlite3.Row]) -> bytes:
-    """
-    rows: result of the receipt query (outstanding items by borrower)
-    Returns PDF bytes.
-    """
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
-    width, height = letter
-
-    y = height - 72
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(72, y, "Supply Checkout Receipt (Outstanding Items)")
-    y -= 22
-
-    c.setFont("Helvetica", 10)
-    c.drawString(72, y, f"Borrower: {borrower_name}")
-    y -= 14
-    if borrower_email:
-        c.drawString(72, y, f"Email: {borrower_email}")
-        y -= 14
-    c.drawString(72, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    y -= 22
-
-    # Table header
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(72, y, "Checkout #")
-    c.drawString(140, y, "Checkout date")
-    c.drawString(220, y, "Expected return")
-    c.drawString(320, y, "Item")
-    c.drawRightString(540, y, "Outstanding")
-    y -= 12
-    c.line(72, y, 540, y)
-    y -= 14
-
-    c.setFont("Helvetica", 9)
-
-    for r in rows:
-        # New page if needed
-        if y < 72:
-            c.showPage()
-            y = height - 72
-            c.setFont("Helvetica", 9)
-
-        c.drawString(72, y, str(r["checkout_id"]))
-        c.drawString(140, y, str(r["checkout_date"]))
-        c.drawString(220, y, str(r["expected_return_date"]))
-        c.drawString(320, y, (r["item_name"] or "")[:30])
-        c.drawRightString(540, y, str(r["outstanding_qty"]))
-        y -= 14
-
-    c.showPage()
-    c.save()
-    return buf.getvalue()
-
-
+# ----------------------------
+# BORROWER RECEIPT (no PDF deps; CSV/TXT downloads)
+# ----------------------------
 def page_borrower_receipt():
     require_login()
     st.header("Borrower Receipt")
-
-    st.caption("Look up what a borrower currently has checked out and download a printable receipt.")
+    st.caption("Look up what a borrower currently has checked out and download a receipt (CSV/TXT).")
 
     col1, col2 = st.columns([2, 2], gap="large")
     with col1:
@@ -349,8 +266,7 @@ def page_borrower_receipt():
     with col2:
         borrower_email = st.text_input("Borrower email (optional but recommended)", key="receipt_borrower_email")
 
-    # If email is provided, use it as the primary key (more reliable than names)
-    if st.button("Find outstanding items", type="primary", use_container_width=True):
+    if st.button("Find outstanding items", type="primary", width="stretch"):
         if not borrower_name.strip() and not borrower_email.strip():
             st.error("Enter at least a borrower name or email.")
             return
@@ -364,7 +280,6 @@ def page_borrower_receipt():
             where.append("LOWER(co.borrower_name) = LOWER(?)")
             params.append(borrower_name.strip())
 
-        # Find all outstanding lines for this borrower
         rows = fetch_all(f"""
             SELECT
                 co.id AS checkout_id,
@@ -387,25 +302,47 @@ def page_borrower_receipt():
             st.success("No outstanding items found for that borrower.")
             return
 
-        # Show on screen
-        df = pd.DataFrame([dict(r) for r in rows])[
-            ["checkout_id", "checkout_date", "expected_return_date", "borrower_name", "borrower_email", "borrower_group", "item_name", "outstanding_qty"]
-        ]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        df = pd.DataFrame([dict(r) for r in rows])[[
+            "checkout_id", "checkout_date", "expected_return_date",
+            "borrower_name", "borrower_email", "borrower_group",
+            "item_name", "outstanding_qty"
+        ]]
+        st.dataframe(df, width="stretch", hide_index=True)
 
-        # Build PDF
-        display_name = rows[0]["borrower_name"] or borrower_name.strip()
-        display_email = rows[0]["borrower_email"] or borrower_email.strip()
-        pdf_bytes = build_receipt_pdf(display_name, display_email, rows)
+        safe_name = (df.loc[0, "borrower_name"] or "borrower").replace(" ", "_")
 
+        # CSV download
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="Download printable PDF receipt",
-            data=pdf_bytes,
-            file_name=f"checkout_receipt_{display_name.replace(' ', '_')}.pdf",
-            mime="application/pdf",
-            use_container_width=True
+            label="Download CSV",
+            data=csv_bytes,
+            file_name=f"checked_out_{safe_name}.csv",
+            mime="text/csv",
+            width="stretch",
         )
 
+        # TXT receipt download
+        receipt_lines = [
+            "Supply Checkout Receipt (Outstanding Items)",
+            f"Borrower: {df.loc[0, 'borrower_name']}",
+            f"Email: {df.loc[0, 'borrower_email']}",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "",
+        ]
+        for _, r in df.iterrows():
+            receipt_lines.append(
+                f"Checkout #{r['checkout_id']} | {r['checkout_date']} -> {r['expected_return_date']} | "
+                f"{r['item_name']} | outstanding: {r['outstanding_qty']}"
+            )
+        receipt_text = "\n".join(receipt_lines).encode("utf-8")
+
+        st.download_button(
+            label="Download receipt (TXT)",
+            data=receipt_text,
+            file_name=f"checked_out_{safe_name}.txt",
+            mime="text/plain",
+            width="stretch",
+        )
 
 # ---------------------------
 # UI Pages
@@ -449,15 +386,13 @@ def page_admin_users():
         st.stop()
 
     st.header("Admin: User Management")
-
     st.caption("Create users, reset passwords, and activate/deactivate accounts.")
 
-    # List users
     users = fetch_all("SELECT id, username, role, active, created_at FROM users ORDER BY role DESC, username ASC")
     df = pd.DataFrame([dict(u) for u in users]) if users else pd.DataFrame(columns=["id","username","role","active","created_at"])
     if not df.empty:
         df["active"] = df["active"].map(lambda x: "Yes" if x == 1 else "No")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     st.divider()
 
@@ -494,8 +429,11 @@ def page_admin_users():
             st.info("No users found.")
             return
 
-        selected_id = st.selectbox("Select user", options=[x[0] for x in user_options],
-                                   format_func=lambda uid: dict(user_options).get(uid, str(uid)))
+        selected_id = st.selectbox(
+            "Select user",
+            options=[x[0] for x in user_options],
+            format_func=lambda uid: dict(user_options).get(uid, str(uid))
+        )
         selected = fetch_one("SELECT * FROM users WHERE id=?", (selected_id,))
         if not selected:
             st.warning("User not found.")
@@ -529,6 +467,10 @@ def page_admin_users():
             execute(f"UPDATE users SET {', '.join(updates)} WHERE id=?", tuple(params))
             st.success("User updated.")
             st.rerun()
+
+# NOTE: The rest of your pages (Categories, Items, Checkout, Checked Out, Reports, Logout)
+# should have their `use_container_width=True` replaced with `width="stretch"`.
+# Keep the rest of your code as-is; only swap the parameter name/value.
 
 def page_categories():
     require_login()
@@ -1064,58 +1006,476 @@ def page_logout():
 # ---------------------------
 # App Shell
 # ---------------------------
-def main():
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
+import streamlit as st
+import sqlite3
+import hashlib
+import os
+import hmac
+import secrets
+from datetime import date, datetime
+import pandas as pd
 
-    init_db()
+APP_TITLE = "SIB Inventory Supply Checkout System"
+DB_PATH = "inventory_checkout.db"
 
-    st.session_state.setdefault("logged_in", False)
-    st.session_state.setdefault("user_id", None)
-    st.session_state.setdefault("username", None)
-    st.session_state.setdefault("role", None)
+# ---------------------------
+# Security / Password hashing
+# ---------------------------
+# PBKDF2-HMAC-SHA256 with per-user salt
+PBKDF2_ITERS = 200_000
 
-    # ✅ Logo at the very top of the sidebar, theme-aware
-    render_sidebar_logo()
+def _pbkdf2_hash(password: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERS)
 
-    if not st.session_state.logged_in:
-        page_login()
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = _pbkdf2_hash(password, salt)
+    return f"{salt.hex()}:{digest.hex()}"
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt_hex, digest_hex = stored.split(":")
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+        got = _pbkdf2_hash(password, salt)
+        return hmac.compare_digest(got, expected)
+    except Exception:
+        return False
+
+# ------------------------------
+# BREAK GLASS (token-gated)
+# ------------------------------
+def reset_admin_password_to_default():
+    # Reads from secrets; never hard-code the token in your repo.
+    token_expected = st.secrets.get("admin_reset", {}).get("token")
+    default_pw = st.secrets.get("admin_reset", {}).get("default_password", "admin123")
+
+    if not token_expected:
+        st.error("Admin reset is not configured (missing admin_reset.token in Secrets).")
         return
 
-       # Sidebar navigation
+    st.subheader("Emergency admin reset")
+    st.caption("This will set the 'admin' password back to the default and re-activate the account.")
+
+    entered = st.text_input("Reset token", type="password", key="admin_reset_token_entered")
+    if st.button("Reset admin password", type="primary", width="stretch"):
+        if entered != token_expected:
+            st.error("Invalid reset token.")
+            return
+
+        row = fetch_one("SELECT id FROM users WHERE username=?", ("admin",))
+        if not row:
+            st.error("No 'admin' user found in the database.")
+            return
+
+        execute(
+            "UPDATE users SET password_hash=?, active=1 WHERE username=?",
+            (hash_password(default_pw), "admin")
+        )
+        st.success("Admin password reset. You can now log in with the default password.")
+
+# ---------------------------
+# Branding: theme-aware sidebar logo
+# ---------------------------
+LOGO_LIGHT_URL = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
+LOGO_DARK_URL  = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
+
+def render_sidebar_logo():
+    # Streamlit 1.53+: st.context.theme.type -> "light" or "dark"
+    theme_type = None
+    try:
+        theme_type = st.context.theme.get("type", None)  # dict-like
+    except Exception:
+        theme_type = None
+
+    logo = LOGO_DARK_URL if theme_type == "dark" else LOGO_LIGHT_URL
+
     with st.sidebar:
+        st.image(logo, width="stretch")
 
+# ---------------------------
+# Database
+# ---------------------------
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
 
+    # Users
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',         -- 'admin' or 'user'
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+    """)
 
-        st.markdown(f"### {APP_TITLE}")
-        st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
-        st.divider()
+    # Categories
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created_by INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        )
+    """)
 
-        pages = ["Checkout", "Currently Checked Out", "Borrower Receipt", "Items", "Categories", "Reports"]
+    # Items
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            category_id INTEGER,
+            total_qty INTEGER NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_by INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(category_id) REFERENCES categories(id),
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        )
+    """)
 
-        if is_admin():
-            pages.insert(0, "Admin: Users")
-        pages.append("Logout")
+    # Checkout "header"
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS checkouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkout_date TEXT NOT NULL,
+            expected_return_date TEXT NOT NULL,
+            borrower_name TEXT NOT NULL,
+            borrower_email TEXT NOT NULL,
+            borrower_group TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            actual_return_date TEXT,                   -- if fully returned, optional convenience
+            FOREIGN KEY(created_by) REFERENCES users(id)
+        )
+    """)
 
-        choice = st.radio("Navigation", pages, label_visibility="collapsed")
+    # Checkout line items
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS checkout_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkout_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            qty INTEGER NOT NULL,
+            returned_qty INTEGER NOT NULL DEFAULT 0,
+            returned_at TEXT,                          -- when last updated (optional)
+            FOREIGN KEY(checkout_id) REFERENCES checkouts(id),
+            FOREIGN KEY(item_id) REFERENCES items(id)
+        )
+    """)
 
+    conn.commit()
 
-    if choice == "Admin: Users":
-        page_admin_users()
-    elif choice == "Categories":
-        page_categories()
-    elif choice == "Items":
-        page_items()
-    elif choice == "Checkout":
-        page_checkout()
-    elif choice == "Currently Checked Out":
-        page_checked_out()
-    elif choice == "Borrower Receipt":
- 	    page_borrower_receipt()
-    elif choice == "Reports":
-        page_reports()
-    elif choice == "Logout":
-        page_logout()
+    # Create default admin if none exists
+    cur.execute("SELECT COUNT(*) as c FROM users WHERE role='admin'")
+    if cur.fetchone()["c"] == 0:
+        default_user = "admin"
+        default_pass = "admin123"
+        cur.execute("""
+            INSERT INTO users (username, password_hash, role, active, created_at)
+            VALUES (?, ?, 'admin', 1, ?)
+        """, (default_user, hash_password(default_pass), datetime.utcnow().isoformat()))
+        conn.commit()
 
-if __name__ == "__main__":
-    main()
+    conn.close()
+
+# ---------------------------
+# Data helpers
+# ---------------------------
+def fetch_one(query, params=()):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def fetch_all(query, params=()):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def execute(query, params=()):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    conn.commit()
+    last_id = cur.lastrowid
+    conn.close()
+    return last_id
+
+def execute_many(query, params_list):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.executemany(query, params_list)
+    conn.commit()
+    conn.close()
+
+def is_admin():
+    return st.session_state.get("role") == "admin"
+
+def require_login():
+    if not st.session_state.get("logged_in"):
+        st.warning("Please log in to continue.")
+        st.stop()
+
+def now_iso():
+    return datetime.utcnow().isoformat()
+
+# ---------------------------
+# Inventory availability math
+# ---------------------------
+def get_outstanding_by_item():
+    """
+    Returns dict[item_id] = outstanding_qty (checked out but not returned).
+    """
+    rows = fetch_all("""
+        SELECT item_id,
+               SUM(qty - returned_qty) AS outstanding
+        FROM checkout_lines
+        GROUP BY item_id
+    """)
+    out = {}
+    for r in rows:
+        out[r["item_id"]] = int(r["outstanding"] or 0)
+    return out
+
+def get_available_qty(item_id: int) -> int:
+    item = fetch_one("SELECT total_qty FROM items WHERE id=?", (item_id,))
+    if not item:
+        return 0
+    total = int(item["total_qty"])
+    outstanding = get_outstanding_by_item().get(item_id, 0)
+    return max(total - outstanding, 0)
+
+# ----------------------------
+# BORROWER RECEIPT (no PDF deps; CSV/TXT downloads)
+# ----------------------------
+def page_borrower_receipt():
+    require_login()
+    st.header("Borrower Receipt")
+    st.caption("Look up what a borrower currently has checked out and download a receipt (CSV/TXT).")
+
+    col1, col2 = st.columns([2, 2], gap="large")
+    with col1:
+        borrower_name = st.text_input("Borrower name (exact match is best)", key="receipt_borrower_name")
+    with col2:
+        borrower_email = st.text_input("Borrower email (optional but recommended)", key="receipt_borrower_email")
+
+    if st.button("Find outstanding items", type="primary", width="stretch"):
+        if not borrower_name.strip() and not borrower_email.strip():
+            st.error("Enter at least a borrower name or email.")
+            return
+
+        params = []
+        where = []
+        if borrower_email.strip():
+            where.append("LOWER(co.borrower_email) = LOWER(?)")
+            params.append(borrower_email.strip())
+        if borrower_name.strip():
+            where.append("LOWER(co.borrower_name) = LOWER(?)")
+            params.append(borrower_name.strip())
+
+        rows = fetch_all(f"""
+            SELECT
+                co.id AS checkout_id,
+                co.checkout_date,
+                co.expected_return_date,
+                co.borrower_name,
+                co.borrower_email,
+                co.borrower_group,
+                i.name AS item_name,
+                (cl.qty - cl.returned_qty) AS outstanding_qty
+            FROM checkout_lines cl
+            JOIN checkouts co ON co.id = cl.checkout_id
+            JOIN items i ON i.id = cl.item_id
+            WHERE (cl.qty - cl.returned_qty) > 0
+              AND ({' AND '.join(where)})
+            ORDER BY co.checkout_date DESC, co.id DESC, i.name ASC
+        """, tuple(params))
+
+        if not rows:
+            st.success("No outstanding items found for that borrower.")
+            return
+
+        df = pd.DataFrame([dict(r) for r in rows])[[
+            "checkout_id", "checkout_date", "expected_return_date",
+            "borrower_name", "borrower_email", "borrower_group",
+            "item_name", "outstanding_qty"
+        ]]
+        st.dataframe(df, width="stretch", hide_index=True)
+
+        safe_name = (df.loc[0, "borrower_name"] or "borrower").replace(" ", "_")
+
+        # CSV download
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download CSV",
+            data=csv_bytes,
+            file_name=f"checked_out_{safe_name}.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+        # TXT receipt download
+        receipt_lines = [
+            "Supply Checkout Receipt (Outstanding Items)",
+            f"Borrower: {df.loc[0, 'borrower_name']}",
+            f"Email: {df.loc[0, 'borrower_email']}",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "",
+        ]
+        for _, r in df.iterrows():
+            receipt_lines.append(
+                f"Checkout #{r['checkout_id']} | {r['checkout_date']} -> {r['expected_return_date']} | "
+                f"{r['item_name']} | outstanding: {r['outstanding_qty']}"
+            )
+        receipt_text = "\n".join(receipt_lines).encode("utf-8")
+
+        st.download_button(
+            label="Download receipt (TXT)",
+            data=receipt_text,
+            file_name=f"checked_out_{safe_name}.txt",
+            mime="text/plain",
+            width="stretch",
+        )
+
+# ---------------------------
+# UI Pages
+# ---------------------------
+def page_login():
+    st.title(APP_TITLE)
+    st.subheader("Login")
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log in")
+
+    if submitted:
+        row = fetch_one("SELECT * FROM users WHERE username=?", (username.strip(),))
+        if not row:
+            st.error("Invalid username or password.")
+            return
+        if row["active"] != 1:
+            st.error("Account is deactivated. Contact an admin.")
+            return
+        if not verify_password(password, row["password_hash"]):
+            st.error("Invalid username or password.")
+            return
+
+        st.session_state.logged_in = True
+        st.session_state.user_id = row["id"]
+        st.session_state.username = row["username"]
+        st.session_state.role = row["role"]
+        st.success(f"Welcome, {row['username']}!")
+        st.rerun()
+
+    # ✅ Break-glass reset (token-gated)
+    with st.expander("Forgot admin password?", expanded=False):
+        reset_admin_password_to_default()
+
+def page_admin_users():
+    require_login()
+    if not is_admin():
+        st.error("Admins only.")
+        st.stop()
+
+    st.header("Admin: User Management")
+    st.caption("Create users, reset passwords, and activate/deactivate accounts.")
+
+    users = fetch_all("SELECT id, username, role, active, created_at FROM users ORDER BY role DESC, username ASC")
+    df = pd.DataFrame([dict(u) for u in users]) if users else pd.DataFrame(columns=["id","username","role","active","created_at"])
+    if not df.empty:
+        df["active"] = df["active"].map(lambda x: "Yes" if x == 1 else "No")
+    st.dataframe(df, width="stretch", hide_index=True)
+
+    st.divider()
+
+    col1, col2 = st.columns(2, gap="large")
+
+    with col1:
+        st.subheader("Create user")
+        with st.form("create_user"):
+            new_username = st.text_input("Username", key="new_username")
+            new_password = st.text_input("Password", type="password", key="new_password")
+            new_role = st.selectbox("Role", ["user", "admin"], index=0)
+            create = st.form_submit_button("Create")
+        if create:
+            u = new_username.strip()
+            if not u:
+                st.error("Username required.")
+            elif len(new_password) < 6:
+                st.error("Use a password of at least 6 characters.")
+            else:
+                try:
+                    execute("""
+                        INSERT INTO users (username, password_hash, role, active, created_at)
+                        VALUES (?, ?, ?, 1, ?)
+                    """, (u, hash_password(new_password), new_role, now_iso()))
+                    st.success("User created.")
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("That username already exists.")
+
+    with col2:
+        st.subheader("Manage existing user")
+        user_options = [(u["id"], u["username"]) for u in users]
+        if not user_options:
+            st.info("No users found.")
+            return
+
+        selected_id = st.selectbox(
+            "Select user",
+            options=[x[0] for x in user_options],
+            format_func=lambda uid: dict(user_options).get(uid, str(uid))
+        )
+        selected = fetch_one("SELECT * FROM users WHERE id=?", (selected_id,))
+        if not selected:
+            st.warning("User not found.")
+            return
+
+        st.write(f"**Role:** {selected['role']}")
+        st.write(f"**Active:** {'Yes' if selected['active']==1 else 'No'}")
+
+        with st.form("manage_user"):
+            reset_pw = st.text_input("Reset password (optional)", type="password")
+            new_role2 = st.selectbox("Change role", ["user", "admin"], index=0 if selected["role"]=="user" else 1)
+            active2 = st.selectbox("Active?", ["Yes", "No"], index=0 if selected["active"]==1 else 1)
+            save = st.form_submit_button("Save changes")
+
+        if save:
+            updates = []
+            params = []
+            updates.append("role=?")
+            params.append(new_role2)
+            updates.append("active=?")
+            params.append(1 if active2 == "Yes" else 0)
+
+            if reset_pw.strip():
+                if len(reset_pw) < 6:
+                    st.error("Password must be at least 6 characters.")
+                    return
+                updates.append("password_hash=?")
+                params.append(hash_password(reset_pw))
+
+            params.append(selected_id)
+            execute(f"UPDATE users SET {', '.join(updates)} WHERE id=?", tuple(params))
+            st.success("User updated.")
+            st.rerun()
+
+# NOTE: The rest of your pages (Categories, Items, Checkout, Checked Out, Reports, Logout)
+# should have their `use_container_width=True` replaced with `width="stretch"`.
+# Keep the rest of your code as-is; only swap the parameter name/value.
