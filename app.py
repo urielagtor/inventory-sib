@@ -41,107 +41,16 @@ def verify_password(password: str, stored: str) -> bool:
 LOGO_LIGHT_URL = "https://www.asoit.org/ASOIT_Logo_Regular.png"
 LOGO_DARK_URL  = "https://www.asoit.org/ASOIT_Logo_DarkBg.png"
 
-def get_theme_mode():
-    """
-    Returns "light" or "dark", based on Streamlit's *current* rendered theme.
-    Uses an inline st.components.v2 component that watches for theme changes.
-    """
-    try:
-        theme_detector = st.components.v2.component(
-            "theme_detector_v1",
-            js=r"""
-export default function(component) {
-  const { setStateValue } = component;
-
-  function parseRgb(color) {
-    // Expected: "rgb(r, g, b)" or "rgba(r, g, b, a)"
-    const m = color && color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
-    if (!m) return null;
-    return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
-  }
-
-  function luminance([r, g, b]) {
-    // Perceived luminance (simple, fast)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  }
-
-  function computeMode() {
-    // Try a few likely places; theme toggles typically change CSS vars / computed colors.
-    const bodyBg = getComputedStyle(document.body).backgroundColor;
-    const main = document.querySelector('[data-testid="stAppViewContainer"]');
-    const mainBg = main ? getComputedStyle(main).backgroundColor : null;
-
-    // Prefer main container if present, otherwise body
-    const rgb = parseRgb(mainBg) || parseRgb(bodyBg);
-    if (!rgb) return "light"; // safe default
-
-    const lum = luminance(rgb);
-    return (lum < 128) ? "dark" : "light";
-  }
-
-  let lastMode = null;
-
-  function pushIfChanged() {
-    const mode = computeMode();
-    if (mode !== lastMode) {
-      lastMode = mode;
-      setStateValue("mode", mode);
-    }
-  }
-
-  // Initial push
-  pushIfChanged();
-
-  // Watch for DOM / style changes (theme toggle updates classes / CSS vars)
-  const observer = new MutationObserver(() => {
-    // Debounce-ish: push after mutations settle
-    window.requestAnimationFrame(pushIfChanged);
-  });
-
-  observer.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["class", "style", "data-theme"],
-    subtree: false
-  });
-
-  observer.observe(document.body, {
-    attributes: true,
-    attributeFilter: ["class", "style"],
-    subtree: false
-  });
-
-  // Also listen to system changes just in case the app is set to "Use system setting"
-  const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  const mqHandler = () => window.requestAnimationFrame(pushIfChanged);
-  if (mq && mq.addEventListener) mq.addEventListener("change", mqHandler);
-
-  // Cleanup on unmount
-  return () => {
-    observer.disconnect();
-    if (mq && mq.removeEventListener) mq.removeEventListener("change", mqHandler);
-  };
-}
-"""
-        )
-
-        result = theme_detector(key="theme_detector_v1")
-        mode = getattr(result, "mode", None)
-
-        # Persist last-known mode so logo doesn't flicker on reruns
-        if mode in ("light", "dark"):
-            st.session_state["theme_mode"] = mode
-
-        return st.session_state.get("theme_mode", "light")
-    except Exception:
-        # Fallback: if components.v2 isn't available in your Streamlit version
-        return st.session_state.get("theme_mode", "light")
-
-
 def render_sidebar_logo():
-    mode = get_theme_mode()
-    logo = LOGO_DARK_URL if mode == "dark" else LOGO_LIGHT_URL
+    # Streamlit 1.53+: st.context.theme.type -> "light" or "dark"
+    theme_type = None
+    try:
+        theme_type = st.context.theme.get("type", None)  # dict-like
+    except Exception:
+        theme_type = None
 
-    # Put logo at the top of the sidebar
+    logo = LOGO_DARK_URL if theme_type == "dark" else LOGO_LIGHT_URL
+
     with st.sidebar:
         st.image(logo, use_container_width=True)
 
