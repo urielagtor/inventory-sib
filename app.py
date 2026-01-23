@@ -1,13 +1,12 @@
 import streamlit as st
 import sqlite3
 import hashlib
-import os
 import hmac
 import secrets
 from datetime import date, datetime
 import pandas as pd
 
-# ✅ Added for export/printing
+# ✅ PDF for printable receipt + reports
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -20,7 +19,6 @@ DB_PATH = "inventory_checkout.db"
 # ---------------------------
 # Security / Password hashing
 # ---------------------------
-# PBKDF2-HMAC-SHA256 with per-user salt
 PBKDF2_ITERS = 200_000
 
 def _pbkdf2_hash(password: str, salt: bytes) -> bytes:
@@ -41,11 +39,10 @@ def verify_password(password: str, stored: str) -> bool:
     except Exception:
         return False
 
-#------------------------------
+# ------------------------------
 # BREAK GLASS (token-gated)
-#------------------------------
+# ------------------------------
 def reset_admin_password_to_default():
-    # Reads from secrets; never hard-code the token in your repo.
     token_expected = st.secrets.get("admin_reset", {}).get("token")
     default_pw = st.secrets.get("admin_reset", {}).get("default_password", "admin123")
 
@@ -73,29 +70,24 @@ def reset_admin_password_to_default():
         )
         st.success("Admin password reset. You can now log in with the default password.")
 
-# ----------------------------------------------
-# PDF helper (print-ready borrower report)
-# ----------------------------------------------
-def build_borrower_pdf(df: pd.DataFrame, title: str) -> bytes:
+# ---------------------------
+# PDF helpers
+# ---------------------------
+def build_table_pdf(title: str, subtitle_lines: list[str], df: pd.DataFrame) -> bytes:
     """
-    Create a simple print-ready PDF for a borrower's checkout report.
+    Generic PDF generator: title + subtitle lines + dataframe as table.
     Returns PDF bytes.
     """
     buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        leftMargin=36,
-        rightMargin=36,
-        topMargin=36,
-        bottomMargin=36
-    )
-
+    doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
+
     story = []
     story.append(Paragraph(title, styles["Title"]))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles["Normal"]))
+    story.append(Spacer(1, 10))
+
+    for line in subtitle_lines:
+        story.append(Paragraph(line, styles["Normal"]))
     story.append(Spacer(1, 12))
 
     if df is None or df.empty:
@@ -103,13 +95,11 @@ def build_borrower_pdf(df: pd.DataFrame, title: str) -> bytes:
         doc.build(story)
         return buffer.getvalue()
 
-    # Convert dataframe to table data
     data = [list(df.columns)] + df.astype(str).values.tolist()
-
     table = Table(data, repeatRows=1)
+
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
@@ -123,28 +113,70 @@ def build_borrower_pdf(df: pd.DataFrame, title: str) -> bytes:
 
     story.append(table)
     doc.build(story)
-
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
 
+def build_checkout_receipt_pdf(checkout_id: int) -> bytes:
+    """
+    Builds a printable receipt PDF for a single checkout_id.
+    """
+    header = fetch_one("""
+        SELECT
+            co.id AS checkout_id,
+            co.checkout_date,
+            co.expected_return_date,
+            co.borrower_name,
+            co.borrower_email,
+            co.borrower_group,
+            u.username AS created_by,
+            co.created_at
+        FROM checkouts co
+        JOIN users u ON u.id = co.created_by
+        WHERE co.id = ?
+    """, (checkout_id,))
+    if not header:
+        return build_table_pdf("Checkout Receipt", [f"Checkout #{checkout_id}", "Not found."], pd.DataFrame())
+
+    lines = fetch_all("""
+        SELECT
+            i.name AS item_name,
+            cl.qty AS qty
+        FROM checkout_lines cl
+        JOIN items i ON i.id = cl.item_id
+        WHERE cl.checkout_id = ?
+        ORDER BY i.name ASC
+    """, (checkout_id,))
+
+    df = pd.DataFrame([dict(r) for r in lines]) if lines else pd.DataFrame(columns=["item_name", "qty"])
+    if not df.empty:
+        df = df.rename(columns={"item_name": "Item", "qty": "Qty"})
+
+    subtitle = [
+        f"Checkout #: {header['checkout_id']}",
+        f"Borrower: {header['borrower_name']} ({header['borrower_email']})",
+        f"Group: {header['borrower_group']}",
+        f"Checkout date: {header['checkout_date']}    Expected return: {header['expected_return_date']}",
+        f"Recorded by: {header['created_by']}    Created at: {header['created_at']}",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+
+    return build_table_pdf("Checkout Receipt", subtitle, df)
+
 # ---------------------------
 # Database
 # ---------------------------
-
 LOGO_LIGHT_URL = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
 LOGO_DARK_URL  = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
 
 def render_sidebar_logo():
-    # Streamlit 1.53+: st.context.theme.type -> "light" or "dark"
     theme_type = None
     try:
-        theme_type = st.context.theme.get("type", None)  # dict-like
+        theme_type = st.context.theme.get("type", None)
     except Exception:
         theme_type = None
 
     logo = LOGO_DARK_URL if theme_type == "dark" else LOGO_LIGHT_URL
-
     with st.sidebar:
         st.image(logo, use_container_width=True)
 
@@ -157,19 +189,17 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # Users
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',         -- 'admin' or 'user'
+            role TEXT NOT NULL DEFAULT 'user',
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         )
     """)
 
-    # Categories
     cur.execute("""
         CREATE TABLE IF NOT EXISTS categories (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,7 +210,6 @@ def init_db():
         )
     """)
 
-    # Items
     cur.execute("""
         CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,7 +224,6 @@ def init_db():
         )
     """)
 
-    # Checkout "header"
     cur.execute("""
         CREATE TABLE IF NOT EXISTS checkouts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,12 +234,11 @@ def init_db():
             borrower_group TEXT NOT NULL,
             created_by INTEGER NOT NULL,
             created_at TEXT NOT NULL,
-            actual_return_date TEXT,                   -- if fully returned, optional convenience
+            actual_return_date TEXT,
             FOREIGN KEY(created_by) REFERENCES users(id)
         )
     """)
 
-    # Checkout line items
     cur.execute("""
         CREATE TABLE IF NOT EXISTS checkout_lines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,7 +246,7 @@ def init_db():
             item_id INTEGER NOT NULL,
             qty INTEGER NOT NULL,
             returned_qty INTEGER NOT NULL DEFAULT 0,
-            returned_at TEXT,                          -- when last updated (optional)
+            returned_at TEXT,
             FOREIGN KEY(checkout_id) REFERENCES checkouts(id),
             FOREIGN KEY(item_id) REFERENCES items(id)
         )
@@ -227,7 +254,6 @@ def init_db():
 
     conn.commit()
 
-    # Create default admin if none exists
     cur.execute("SELECT COUNT(*) as c FROM users WHERE role='admin'")
     if cur.fetchone()["c"] == 0:
         default_user = "admin"
@@ -290,9 +316,6 @@ def now_iso():
 # Inventory availability math
 # ---------------------------
 def get_outstanding_by_item():
-    """
-    Returns dict[item_id] = outstanding_qty (checked out but not returned).
-    """
     rows = fetch_all("""
         SELECT item_id,
                SUM(qty - returned_qty) AS outstanding
@@ -343,7 +366,6 @@ def page_login():
         st.success(f"Welcome, {row['username']}!")
         st.rerun()
 
-    # ✅ Break-glass reset (token-gated)
     with st.expander("Forgot admin password?", expanded=False):
         reset_admin_password_to_default()
 
@@ -356,7 +378,6 @@ def page_admin_users():
     st.header("Admin: User Management")
     st.caption("Create users, reset passwords, and activate/deactivate accounts.")
 
-    # List users
     users = fetch_all("SELECT id, username, role, active, created_at FROM users ORDER BY role DESC, username ASC")
     df = pd.DataFrame([dict(u) for u in users]) if users else pd.DataFrame(columns=["id","username","role","active","created_at"])
     if not df.empty:
@@ -634,6 +655,44 @@ def page_checkout():
     require_login()
     st.header("Checkout Supplies")
 
+    # ✅ If we just submitted a checkout, show the receipt right at the top
+    if "last_checkout_receipt" not in st.session_state:
+        st.session_state.last_checkout_receipt = None  # dict: {checkout_id, pdf_bytes, borrower_email}
+
+    if st.session_state.last_checkout_receipt:
+        rec = st.session_state.last_checkout_receipt
+        st.success(f"Checkout submitted successfully! Receipt ready for Checkout #{rec['checkout_id']}.")
+
+        st.download_button(
+            "Download / Print Receipt (PDF)",
+            data=rec["pdf_bytes"],
+            file_name=f"checkout_receipt_{rec['checkout_id']}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        st.caption("Tip: Open the downloaded PDF and print it from your browser/PDF viewer.")
+
+        # Show a quick preview table from the DB
+        preview_lines = fetch_all("""
+            SELECT i.name AS item, cl.qty
+            FROM checkout_lines cl
+            JOIN items i ON i.id = cl.item_id
+            WHERE cl.checkout_id = ?
+            ORDER BY i.name ASC
+        """, (rec["checkout_id"],))
+        prev_df = pd.DataFrame([dict(r) for r in preview_lines]) if preview_lines else pd.DataFrame(columns=["item", "qty"])
+        st.dataframe(prev_df, use_container_width=True, hide_index=True)
+
+        colA, colB = st.columns([1, 1], gap="large")
+        with colA:
+            if st.button("Start New Checkout", use_container_width=True):
+                st.session_state.last_checkout_receipt = None
+                st.rerun()
+        with colB:
+            st.info("Scroll down to create another checkout (or click Start New Checkout).")
+
+        st.divider()
+
     items = fetch_all("SELECT id, name, total_qty FROM items ORDER BY name ASC")
     if not items:
         st.info("No items found. Add items first.")
@@ -650,9 +709,8 @@ def page_checkout():
 
     st.caption("Build a checkout cart (multiple items), then submit as one checkout record.")
 
-    # "Cart" stored in session
     if "cart" not in st.session_state:
-        st.session_state.cart = []  # list of dict: {item_id, item_label, qty}
+        st.session_state.cart = []
 
     with st.expander("1) Borrower details & dates", expanded=True):
         colA, colB = st.columns(2, gap="large")
@@ -691,7 +749,6 @@ def page_checkout():
             elif int(qty) > max_avail:
                 st.error(f"Only {max_avail} available.")
             else:
-                # If already in cart, increment but do not exceed availability (simple check)
                 found = False
                 for line in st.session_state.cart:
                     if line["item_id"] == selected_item_id:
@@ -712,7 +769,6 @@ def page_checkout():
                     st.success("Added to cart.")
                 st.rerun()
 
-        # Show cart
         st.subheader("Current cart")
         if not st.session_state.cart:
             st.info("Cart is empty.")
@@ -737,7 +793,6 @@ def page_checkout():
     st.subheader("3) Submit checkout")
 
     if st.button("Submit checkout", type="primary", use_container_width=True):
-        # Validate
         if not borrower_name.strip():
             st.error("Borrower name is required.")
             return
@@ -754,14 +809,13 @@ def page_checkout():
             st.error("Add at least one item to the cart.")
             return
 
-        # Re-check availability at submit time (race-safety for multi-user local)
+        # Re-check availability at submit time
         for c in st.session_state.cart:
             avail = get_available_qty(c["item_id"])
             if c["qty"] > avail:
                 st.error(f"Not enough available for: {c['item_label']} (need {c['qty']}, available {avail})")
                 return
 
-        # Create checkout header
         checkout_id = execute("""
             INSERT INTO checkouts (
                 checkout_date, expected_return_date,
@@ -778,7 +832,6 @@ def page_checkout():
             now_iso()
         ))
 
-        # Insert lines
         params = []
         for c in st.session_state.cart:
             params.append((checkout_id, c["item_id"], int(c["qty"])))
@@ -787,15 +840,23 @@ def page_checkout():
             VALUES (?, ?, ?)
         """, params)
 
+        # ✅ Build receipt PDF from DB and show it at top on rerun
+        pdf_bytes = build_checkout_receipt_pdf(checkout_id)
+        st.session_state.last_checkout_receipt = {
+            "checkout_id": checkout_id,
+            "pdf_bytes": pdf_bytes,
+            "borrower_email": borrower_email.strip(),
+        }
+
+        # Clear cart after submit
         st.session_state.cart = []
-        st.success(f"Checkout submitted (ID: {checkout_id}).")
+        st.success(f"Checkout submitted (ID: {checkout_id}). Receipt generated.")
         st.rerun()
 
 def page_checked_out():
     require_login()
     st.header("Currently Checked Out")
 
-    # All outstanding lines
     rows = fetch_all("""
         SELECT
             co.id AS checkout_id,
@@ -959,148 +1020,6 @@ def page_reports():
     ])
     st.dataframe(hdf, use_container_width=True, hide_index=True)
 
-    # ✅ NEW: Borrower report (print/export)
-    st.divider()
-    st.subheader("Borrower report (print / export)")
-
-    borrowers = fetch_all("""
-        SELECT borrower_email, borrower_name, MAX(checkout_date) AS last_checkout
-        FROM checkouts
-        GROUP BY borrower_email, borrower_name
-        ORDER BY borrower_name ASC
-    """)
-
-    if not borrowers:
-        st.info("No borrowers found yet.")
-        return
-
-    borrower_options = []
-    borrower_map = {}
-    for b in borrowers:
-        label = f"{b['borrower_name']} <{b['borrower_email']}>"
-        borrower_options.append(label)
-        borrower_map[label] = (b["borrower_name"], b["borrower_email"])
-
-    selected_borrower = st.selectbox("Select borrower", borrower_options)
-    sel_name, sel_email = borrower_map[selected_borrower]
-
-    tab1, tab2 = st.tabs(["Currently checked out", "Full history"])
-
-    with tab1:
-        out_rows = fetch_all("""
-            SELECT
-                co.id AS checkout_id,
-                co.checkout_date,
-                co.expected_return_date,
-                co.borrower_name,
-                co.borrower_email,
-                co.borrower_group,
-                i.name AS item_name,
-                (cl.qty - cl.returned_qty) AS outstanding_qty
-            FROM checkout_lines cl
-            JOIN checkouts co ON co.id = cl.checkout_id
-            JOIN items i ON i.id = cl.item_id
-            WHERE co.borrower_email = ?
-              AND (cl.qty - cl.returned_qty) > 0
-            ORDER BY co.checkout_date DESC, co.id DESC, i.name ASC
-        """, (sel_email,))
-
-        out_df = pd.DataFrame([dict(r) for r in out_rows]) if out_rows else pd.DataFrame(
-            columns=["checkout_id","checkout_date","expected_return_date","borrower_name","borrower_email","borrower_group","item_name","outstanding_qty"]
-        )
-
-        if out_df.empty:
-            st.success("This borrower has nothing currently checked out.")
-        else:
-            display_df = out_df[[
-                "checkout_id",
-                "checkout_date",
-                "expected_return_date",
-                "borrower_group",
-                "item_name",
-                "outstanding_qty"
-            ]]
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        csv_bytes = out_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV (currently checked out)",
-            data=csv_bytes,
-            file_name=f"checked_out_{sel_email.replace('@','_at_')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        pdf_bytes = build_borrower_pdf(
-            out_df[["checkout_id","checkout_date","expected_return_date","borrower_group","item_name","outstanding_qty"]],
-            title=f"Checked Out Items — {sel_name} <{sel_email}>"
-        )
-        st.download_button(
-            "Download PDF (print-ready)",
-            data=pdf_bytes,
-            file_name=f"checked_out_{sel_email.replace('@','_at_')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-    with tab2:
-        hist_rows = fetch_all("""
-            SELECT
-                co.id AS checkout_id,
-                co.checkout_date,
-                co.expected_return_date,
-                co.actual_return_date,
-                co.borrower_name,
-                co.borrower_email,
-                co.borrower_group,
-                u.username AS created_by,
-                i.name AS item_name,
-                cl.qty,
-                cl.returned_qty,
-                (cl.qty - cl.returned_qty) AS outstanding_qty
-            FROM checkout_lines cl
-            JOIN checkouts co ON co.id = cl.checkout_id
-            JOIN items i ON i.id = cl.item_id
-            JOIN users u ON u.id = co.created_by
-            WHERE co.borrower_email = ?
-            ORDER BY co.id DESC, i.name ASC
-            LIMIT 500
-        """, (sel_email,))
-
-        hist_df = pd.DataFrame([dict(r) for r in hist_rows]) if hist_rows else pd.DataFrame(
-            columns=["checkout_id","checkout_date","expected_return_date","actual_return_date","borrower_group","created_by","item_name","qty","returned_qty","outstanding_qty"]
-        )
-
-        if hist_df.empty:
-            st.info("No history for this borrower yet.")
-        else:
-            display_hist = hist_df[[
-                "checkout_id","checkout_date","expected_return_date","actual_return_date",
-                "borrower_group","created_by","item_name","qty","returned_qty","outstanding_qty"
-            ]]
-            st.dataframe(display_hist, use_container_width=True, hide_index=True)
-
-        hist_csv = hist_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download CSV (full history)",
-            data=hist_csv,
-            file_name=f"history_{sel_email.replace('@','_at_')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-        hist_pdf = build_borrower_pdf(
-            hist_df[["checkout_id","checkout_date","expected_return_date","actual_return_date","borrower_group","created_by","item_name","qty","returned_qty","outstanding_qty"]],
-            title=f"Checkout History — {sel_name} <{sel_email}>"
-        )
-        st.download_button(
-            "Download PDF (history, print-ready)",
-            data=hist_pdf,
-            file_name=f"history_{sel_email.replace('@','_at_')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
 def page_logout():
     st.session_state.clear()
     st.success("Logged out.")
@@ -1119,14 +1038,12 @@ def main():
     st.session_state.setdefault("username", None)
     st.session_state.setdefault("role", None)
 
-    # ✅ Logo at the very top of the sidebar, theme-aware
     render_sidebar_logo()
 
     if not st.session_state.logged_in:
         page_login()
         return
 
-    # Sidebar navigation
     with st.sidebar:
         st.markdown(f"### {APP_TITLE}")
         st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
