@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import secrets
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 # ✅ PDF
@@ -176,7 +177,7 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
     ev_map = {}
     for e in events:
         lid = int(e["line_id"])
-        when = str(e["returned_at"])
+        when = to_local_display(e["returned_at"])
         who = str(e["returned_by"])
         qty = int(e["returned_qty"] or 0)
         ev_map.setdefault(lid, []).append(f"{when} — {who} — qty {qty}")
@@ -186,7 +187,7 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
         f"Borrower: {header['borrower_name']} ({header['borrower_email']})",
         f"Group: {header['borrower_group']}",
         f"Checkout date: {header['checkout_date']}    Expected return: {header['expected_return_date']}",
-        f"Recorded by: {header['created_by']}    Created at: {header['created_at']}",
+        f"Recorded by: {header['created_by']}    Created at: {to_local_display(header['created_at'])}",
         f"Actual return date: {header['actual_return_date'] or '(not fully returned yet)'}",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
     ]
@@ -241,6 +242,7 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+APP_TZ = ZoneInfo("America/Los_Angeles")
 
 def init_db():
     conn = get_conn()
@@ -384,7 +386,30 @@ def require_login():
         st.stop()
 
 def now_iso():
-    return datetime.utcnow().isoformat()
+    # store in UTC so DB stays consistent
+    return datetime.now(datetime.UTC).isoformat()
+def to_local_display(dt_str: str) -> str:
+    """
+    Convert stored ISO timestamp (UTC) into America/Los_Angeles for display.
+    """
+    if not dt_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.UTC)
+        return dt.astimezone(APP_TZ).strftime("%Y-%m-%d %I:%M %p")
+    except Exception:
+        return str(dt_str)
+
+def local_returned_at_iso(d: date) -> str:
+    """
+    Convert a date picker value into an ISO timestamp at midnight in America/Los_Angeles,
+    then store it as UTC in the DB.
+    """
+    local_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=APP_TZ)
+    return local_dt.astimezone(datetime.UTC).isoformat()
+
 
 # ---------------------------
 # Inventory availability math
@@ -1084,7 +1109,7 @@ def page_checkin():
         f"**Checkout date:** {header['checkout_date']}  \n"
         f"**Expected return:** {header['expected_return_date']}  \n"
         f"**Created by:** {header['created_by']}  \n"
-        f"**Created at:** {header['created_at']}"
+        f"**Created at:** {to_local_display(header['created_at'])}"
     )
 
     rows = fetch_all("""
@@ -1165,7 +1190,7 @@ def page_checkin():
             st.warning("No returns entered. Set at least one Return Now > 0.")
             return
 
-        returned_at_iso = datetime.combine(actual_return, datetime.min.time()).isoformat()
+        returned_at_iso = local_returned_at_iso(actual_return)
 
         # ✅ Update returned_qty AND write return_events for audit ("who checked in and when")
         for return_now, line_id in updates:
