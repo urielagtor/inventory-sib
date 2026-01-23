@@ -7,7 +7,7 @@ import secrets
 from datetime import date, datetime
 import pandas as pd
 
-APP_TITLE = "Inventory Supply Checkout System"
+APP_TITLE = "SIB Inventory Supply Checkout System"
 DB_PATH = "inventory_checkout.db"
 
 # ---------------------------
