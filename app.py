@@ -38,8 +38,8 @@ def verify_password(password: str, stored: str) -> bool:
 # Database
 # ---------------------------
 
-LOGO_LIGHT_URL = "https://www.asoit.org/ASOIT_Logo_Regular.png"
-LOGO_DARK_URL  = "https://www.asoit.org/ASOIT_Logo_DarkBg.png"
+LOGO_LIGHT_URL = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
+LOGO_DARK_URL  = "https://www.oit.edu/sites/default/files/styles/inline_media_300w/public/2023-03/ot-sib-4c-text.png.webp"
 
 def render_sidebar_logo():
     # Streamlit 1.53+: st.context.theme.type -> "light" or "dark"
