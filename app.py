@@ -33,7 +33,67 @@ def verify_password(password: str, stored: str) -> bool:
         return hmac.compare_digest(got, expected)
     except Exception:
         return False
+def reset_admin_password_to_default():
+    # Reads from secrets; never hard-code the token in your repo.
+    token_expected = st.secrets.get("admin_reset", {}).get("token")
+    default_pw = st.secrets.get("admin_reset", {}).get("default_password", "admin123")
 
+    if not token_expected:
+        st.error("Admin reset is not configured (missing admin_reset.token in Secrets).")
+        return
+
+    st.subheader("Emergency admin reset")
+    st.caption("This will set the 'admin' password back to the default and re-activate the account.")
+
+    entered = st.text_input("Reset token", type="password", key="admin_reset_token_entered")
+    if st.button("Reset admin password", type="primary", use_container_width=True):
+        if entered != token_expected:
+            st.error("Invalid reset token.")
+            return
+
+        row = fetch_one("SELECT id FROM users WHERE username=?", ("admin",))
+        if not row:
+            st.error("No 'admin' user found in the database.")
+            return
+
+        execute(
+            "UPDATE users SET password_hash=?, active=1 WHERE username=?",
+            (hash_password(default_pw), "admin")
+        )
+        st.success("Admin password reset. You can now log in with the default password.")
+
+#------------------------------
+# BREAK GLASS
+#------------------------------
+def reset_admin_password_to_default():
+    # Reads from secrets; never hard-code the token in your repo.
+    token_expected = st.secrets.get("admin_reset", {}).get("token")
+    default_pw = st.secrets.get("admin_reset", {}).get("default_password", "admin123")
+
+    if not token_expected:
+        st.error("Admin reset is not configured (missing admin_reset.token in Secrets).")
+        return
+
+    st.subheader("Emergency admin reset")
+    st.caption("This will set the 'admin' password back to the default and re-activate the account.")
+
+    entered = st.text_input("Reset token", type="password", key="admin_reset_token_entered")
+    if st.button("Reset admin password", type="primary", use_container_width=True):
+        if entered != token_expected:
+            st.error("Invalid reset token.")
+            return
+
+        row = fetch_one("SELECT id FROM users WHERE username=?", ("admin",))
+        if not row:
+            st.error("No 'admin' user found in the database.")
+            return
+
+        execute(
+            "UPDATE users SET password_hash=?, active=1 WHERE username=?",
+            (hash_password(default_pw), "admin")
+        )
+        st.success("Admin password reset. You can now log in with the default password.")
+#----------------------------------------------
 # ---------------------------
 # Database
 # ---------------------------
@@ -248,6 +308,10 @@ def page_login():
         st.session_state.role = row["role"]
         st.success(f"Welcome, {row['username']}!")
         st.rerun()
+
+    # ✅ Break-glass reset (token-gated)
+    with st.expander("Forgot admin password?", expanded=False):
+        reset_admin_password_to_default()
 
 def page_admin_users():
     require_login()
