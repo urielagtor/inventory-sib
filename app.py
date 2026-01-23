@@ -3,7 +3,7 @@ import sqlite3
 import hashlib
 import hmac
 import secrets
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
 
@@ -337,7 +337,7 @@ def init_db():
         cur.execute("""
             INSERT INTO users (username, password_hash, role, active, created_at)
             VALUES (?, ?, 'admin', 1, ?)
-        """, (default_user, hash_password(default_pass), datetime.utcnow().isoformat()))
+        """, (default_user, hash_password(default_pass), tzinfo=timezone.utcnow().isoformat()))
         conn.commit()
 
     conn.close()
@@ -386,8 +386,8 @@ def require_login():
         st.stop()
 
 def now_iso():
-    # store in UTC so DB stays consistent
-    return datetime.now(datetime.UTC).isoformat()
+    # Store UTC timestamps in DB (Python 3.8+ compatible)
+    return datetime.now(timezone.utc).isoformat()
 def to_local_display(dt_str: str) -> str:
     """
     Convert stored ISO timestamp (UTC) into America/Los_Angeles for display.
@@ -397,7 +397,7 @@ def to_local_display(dt_str: str) -> str:
     try:
         dt = datetime.fromisoformat(dt_str)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.UTC)
+            dt = dt.replace(tzinfo=tzinfo=timezone.utc)
         return dt.astimezone(APP_TZ).strftime("%Y-%m-%d %I:%M %p")
     except Exception:
         return str(dt_str)
@@ -408,7 +408,7 @@ def local_returned_at_iso(d: date) -> str:
     then store it as UTC in the DB.
     """
     local_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=APP_TZ)
-    return local_dt.astimezone(datetime.UTC).isoformat()
+    return local_dt.astimezone(tzinfo=timezone.utc).isoformat()
 
 
 # ---------------------------
