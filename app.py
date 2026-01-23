@@ -37,6 +37,42 @@ def verify_password(password: str, stored: str) -> bool:
 # ---------------------------
 # Database
 # ---------------------------
+
+LOGO_LIGHT_URL = "https://www.asoit.org/ASOIT_Logo_Regular.png"
+LOGO_DARK_URL  = "https://www.asoit.org/ASOIT_Logo_DarkBg.png"
+
+def render_sidebar_logo():
+    # Renders both logos; CSS shows the right one depending on light/dark mode.
+    st.sidebar.markdown(
+        f"""
+        <style>
+          .asoit-logo-wrap {{
+            display: flex;
+            justify-content: center;
+            margin: 0.25rem 0 0.75rem 0;
+          }}
+          .asoit-logo-wrap img {{
+            max-width: 220px;
+            width: 100%;
+            height: auto;
+          }}
+          .asoit-logo-light {{ display: block; }}
+          .asoit-logo-dark  {{ display: none;  }}
+
+          @media (prefers-color-scheme: dark) {{
+            .asoit-logo-light {{ display: none;  }}
+            .asoit-logo-dark  {{ display: block; }}
+          }}
+        </style>
+
+        <div class="asoit-logo-wrap">
+          <img class="asoit-logo-light" src="{LOGO_LIGHT_URL}" alt="ASOIT Logo" />
+          <img class="asoit-logo-dark"  src="{LOGO_DARK_URL}"  alt="ASOIT Logo" />
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -865,6 +901,9 @@ def main():
     st.session_state.setdefault("username", None)
     st.session_state.setdefault("role", None)
 
+    # ✅ Always show logo at top of sidebar (even on login screen)
+    render_sidebar_logo()
+
     if not st.session_state.logged_in:
         page_login()
         return
@@ -881,6 +920,7 @@ def main():
         pages.append("Logout")
 
         choice = st.radio("Navigation", pages, label_visibility="collapsed")
+
 
     if choice == "Admin: Users":
         page_admin_users()
