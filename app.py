@@ -209,7 +209,7 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
         ])
 
     # column widths tuned for letter page
-    col_widths = [45, 140, 45, 50, 60, 200]
+    col_widths = [140, 45, 50, 60, 200]
 
     return build_table_pdf("SIB Supply Checkout System", subtitle, table_data, col_widths=col_widths)
 
