@@ -337,7 +337,7 @@ def init_db():
         cur.execute("""
             INSERT INTO users (username, password_hash, role, active, created_at)
             VALUES (?, ?, 'admin', 1, ?)
-        """, (default_user, hash_password(default_pass), tzinfo=timezone.utc, now().isoformat()))
+        """, (default_user, hash_password(default_pass), now_iso()))
         conn.commit()
 
     conn.close()
