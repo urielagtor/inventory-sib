@@ -193,7 +193,7 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
 
     # Build table rows with wrapped "Return Log"
     table_data = [[
-        "Line ID", "Item", "Qty Out", "Returned", "Outstanding", "Return Log (who/when/qty)"
+        "Item", "Qty Out", "Returned", "Outstanding", "Return Log (who/when/qty)"
     ]]
 
     for r in lines:
@@ -201,7 +201,6 @@ def build_ticket_pdf(checkout_id: int) -> bytes:
         log_lines = ev_map.get(lid, [])
         log_text = "<br/>".join(log_lines) if log_lines else "(no returns recorded)"
         table_data.append([
-            str(lid),
             str(r["item_name"]),
             str(int(r["qty"] or 0)),
             str(int(r["returned_qty"] or 0)),
