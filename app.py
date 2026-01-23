@@ -326,6 +326,47 @@ def init_db():
             FOREIGN KEY(returned_by) REFERENCES users(id)
         )
     """)
+        # ---------------------------
+    # Reservations (staging queue)
+    # ---------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            borrower_name TEXT NOT NULL,
+            borrower_email TEXT NOT NULL,
+            borrower_group TEXT NOT NULL,
+
+            est_checkout_date TEXT NOT NULL,          -- YYYY-MM-DD
+            est_checkout_time TEXT,                   -- optional, store as "HH:MM"
+            expected_return_date TEXT NOT NULL,       -- "Check-In Date" (expected return)
+
+            status TEXT NOT NULL DEFAULT 'waiting',   -- waiting | ready | converted
+            notes TEXT,
+
+            created_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+
+            actual_checkout_date TEXT,                -- set when converted
+            actual_checkout_time TEXT,                -- optional
+            checkout_id INTEGER,                      -- link to real checkout ticket
+
+            FOREIGN KEY(created_by) REFERENCES users(id),
+            FOREIGN KEY(checkout_id) REFERENCES checkouts(id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reservation_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reservation_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            qty INTEGER NOT NULL,
+
+            FOREIGN KEY(reservation_id) REFERENCES reservations(id),
+            FOREIGN KEY(item_id) REFERENCES items(id)
+        )
+    """)
 
     conn.commit()
 
@@ -474,6 +515,43 @@ def get_checkout_outstanding_lines(checkout_id: int):
           AND (cl.qty - cl.returned_qty) > 0
         ORDER BY i.name ASC
     """, (checkout_id,))
+
+# ---------------------------
+# Reservation helpers
+# ---------------------------
+RES_STATUS = ["waiting", "ready", "converted"]
+
+def get_reservations_summary(limit: int = 500):
+    rows = fetch_all(f"""
+        SELECT
+            r.id AS reservation_id,
+            r.borrower_name,
+            r.borrower_email,
+            r.borrower_group,
+            r.est_checkout_date,
+            r.est_checkout_time,
+            r.expected_return_date,
+            r.status,
+            r.checkout_id,
+            r.created_at
+        FROM reservations r
+        ORDER BY r.id DESC
+        LIMIT {int(limit)}
+    """)
+    return rows
+
+def get_reservation_lines(reservation_id: int):
+    return fetch_all("""
+        SELECT
+            rl.id AS line_id,
+            rl.item_id,
+            i.name AS item_name,
+            rl.qty
+        FROM reservation_lines rl
+        JOIN items i ON i.id = rl.item_id
+        WHERE rl.reservation_id = ?
+        ORDER BY i.name ASC
+    """, (reservation_id,))
 
 # ---------------------------
 # UI Pages
@@ -1315,6 +1393,367 @@ def page_logout():
     st.session_state.clear()
     st.success("Logged out.")
     st.rerun()
+def page_reservations():
+    require_login()
+    st.header("Reservations (Staging Queue)")
+    st.caption("Reservations do NOT reduce inventory. Convert to a real checkout when ready for pickup.")
+
+    # For success flow (like checkout receipts)
+    if "last_converted_reservation" not in st.session_state:
+        st.session_state.last_converted_reservation = None
+
+    if st.session_state.last_converted_reservation:
+        rec = st.session_state.last_converted_reservation
+        st.success(
+            f"Reservation #{rec['reservation_id']} converted to Ticket #{rec['checkout_id']}."
+        )
+        st.download_button(
+            "Download / Print Ticket (PDF)",
+            data=rec["pdf_bytes"],
+            file_name=f"ticket_{rec['checkout_id']}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        if st.button("Convert another reservation / continue", use_container_width=True):
+            st.session_state.last_converted_reservation = None
+            st.rerun()
+
+        st.divider()
+
+    # ---------------------------------
+    # Create a reservation (manual entry)
+    # ---------------------------------
+    items = fetch_all("SELECT id, name, total_qty FROM items ORDER BY name ASC")
+    if not items:
+        st.info("No items found. Add items first.")
+        return
+
+    outstanding = get_outstanding_by_item()
+
+    item_options = []
+    for it in items:
+        out = int(outstanding.get(it["id"], 0))
+        total = int(it["total_qty"])
+        avail = max(total - out, 0)
+        label = f"{it['name']} (available now: {avail} / total: {total})"
+        item_options.append((it["id"], label, avail))
+
+    if "res_cart" not in st.session_state:
+        st.session_state.res_cart = []
+
+    with st.expander("1) Create reservation (manual staging entry)", expanded=True):
+        colA, colB = st.columns(2, gap="large")
+
+        with colA:
+            r_name = st.text_input("Estimated name", key="res_name")
+            r_email = st.text_input("Email", key="res_email")
+            r_group = st.text_input("Group / organization", key="res_group")
+
+        with colB:
+            est_checkout_date = st.date_input("Check-Out Date (estimated)", value=date.today(), key="res_est_checkout_date")
+
+            specify_time = st.checkbox("Specify estimated check-out time (optional)", value=False, key="res_specify_time")
+            est_time_str = None
+            if specify_time:
+                t = st.time_input("Estimated Check Out Time", value=datetime.now().time().replace(second=0, microsecond=0), key="res_est_time")
+                est_time_str = t.strftime("%H:%M")
+
+            expected_return_date = st.date_input("Check-In Date (expected return)", value=date.today(), key="res_expected_return_date")
+
+        st.divider()
+        st.caption("Add items to the reservation cart (availability is shown as a reference only).")
+
+        col1, col2, col3 = st.columns([3, 1, 1], gap="large")
+        id_list = [x[0] for x in item_options]
+        label_map = {x[0]: x[1] for x in item_options}
+
+        with col1:
+            selected_item_id = st.selectbox(
+                "Item",
+                options=id_list,
+                format_func=lambda i: label_map[i],
+                key="res_selected_item_id"
+            )
+        with col2:
+            qty = st.number_input("Qty", min_value=1, step=1, value=1, key="res_selected_qty")
+        with col3:
+            add = st.button("Add to reservation cart", use_container_width=True)
+
+        if add:
+            found = False
+            for line in st.session_state.res_cart:
+                if line["item_id"] == selected_item_id:
+                    line["qty"] = int(line["qty"]) + int(qty)
+                    found = True
+                    break
+            if not found:
+                st.session_state.res_cart.append({
+                    "item_id": selected_item_id,
+                    "item_label": label_map[selected_item_id],
+                    "qty": int(qty),
+                })
+            st.success("Added to reservation cart.")
+            st.rerun()
+
+        st.subheader("Reservation cart")
+        if not st.session_state.res_cart:
+            st.info("Cart is empty.")
+        else:
+            cart_df = pd.DataFrame([{"item": c["item_label"], "qty": c["qty"]} for c in st.session_state.res_cart])
+            st.dataframe(cart_df, use_container_width=True, hide_index=True)
+
+            colx, coly = st.columns([1, 1], gap="large")
+            with colx:
+                if st.button("Clear reservation cart", use_container_width=True):
+                    st.session_state.res_cart = []
+                    st.rerun()
+            with coly:
+                remove_idx = st.number_input("Remove line # (1..n)", min_value=1, step=1, value=1, max_value=len(st.session_state.res_cart))
+                if st.button("Remove line", use_container_width=True):
+                    idx = int(remove_idx) - 1
+                    if 0 <= idx < len(st.session_state.res_cart):
+                        st.session_state.res_cart.pop(idx)
+                        st.rerun()
+
+        st.divider()
+        notes = st.text_area("Notes (optional)", key="res_notes")
+
+        if st.button("Create reservation", type="primary", use_container_width=True):
+            if not r_name.strip():
+                st.error("Estimated name is required.")
+                return
+            if not r_email.strip():
+                st.error("Email is required.")
+                return
+            if not r_group.strip():
+                st.error("Group/organization is required.")
+                return
+            if expected_return_date < est_checkout_date:
+                st.error("Check-In Date cannot be before Check-Out Date.")
+                return
+            if not st.session_state.res_cart:
+                st.error("Add at least one item to the reservation cart.")
+                return
+
+            reservation_id = execute("""
+                INSERT INTO reservations (
+                    borrower_name, borrower_email, borrower_group,
+                    est_checkout_date, est_checkout_time, expected_return_date,
+                    status, notes,
+                    created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?)
+            """, (
+                r_name.strip(),
+                r_email.strip(),
+                r_group.strip(),
+                est_checkout_date.isoformat(),
+                est_time_str,
+                expected_return_date.isoformat(),
+                notes.strip() or None,
+                st.session_state.user_id,
+                now_iso()
+            ))
+
+            params = []
+            for c in st.session_state.res_cart:
+                params.append((reservation_id, c["item_id"], int(c["qty"])))
+            execute_many("""
+                INSERT INTO reservation_lines (reservation_id, item_id, qty)
+                VALUES (?, ?, ?)
+            """, params)
+
+            st.session_state.res_cart = []
+            st.success(f"Reservation created (Reservation #: {reservation_id}).")
+            st.rerun()
+
+    st.divider()
+
+    # -----------------------------
+    # View / manage reservations
+    # -----------------------------
+    st.subheader("Manage reservations")
+
+    # Filter
+    colF1, colF2 = st.columns([1, 2], gap="large")
+    with colF1:
+        status_filter = st.selectbox("Status filter", ["(all)"] + RES_STATUS, index=0, key="res_status_filter")
+    with colF2:
+        search = st.text_input("Search (name, email, group)", value="", key="res_search").strip().lower()
+
+    rows = get_reservations_summary(limit=500)
+    data = []
+    for r in rows:
+        if status_filter != "(all)" and r["status"] != status_filter:
+            continue
+        blob = f"{r['borrower_name']} {r['borrower_email']} {r['borrower_group']}".lower()
+        if search and search not in blob:
+            continue
+        data.append(dict(r))
+
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=[
+        "reservation_id","borrower_name","borrower_email","borrower_group",
+        "est_checkout_date","est_checkout_time","expected_return_date",
+        "status","checkout_id","created_at"
+    ])
+
+    if df.empty:
+        st.info("No matching reservations.")
+        return
+
+    df = df.rename(columns={
+        "reservation_id": "Reservation #",
+        "borrower_name": "Name",
+        "borrower_email": "Email",
+        "borrower_group": "Group",
+        "est_checkout_date": "Est. Checkout Date",
+        "est_checkout_time": "Est. Checkout Time",
+        "expected_return_date": "Expected Return (Check-In)",
+        "status": "Status",
+        "checkout_id": "Ticket # (if converted)",
+        "created_at": "Created At (UTC)"
+    })
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Reservation details (expand)")
+
+    # Expanders (newest first)
+    for r in data:
+        rid = int(r["reservation_id"])
+        label = f"Reservation #{rid} — {r['borrower_name']} — {r['borrower_group']} (Status: {r['status']})"
+        with st.expander(label, expanded=False):
+            st.write("**Estimated checkout:**", r["est_checkout_date"], r["est_checkout_time"] or "(time not provided)")
+            st.write("**Expected return (check-in):**", r["expected_return_date"])
+            st.write("**Email:**", r["borrower_email"])
+            st.write("**Created at:**", to_local_display(r["created_at"]))
+
+            lines = get_reservation_lines(rid)
+            ldf = pd.DataFrame([dict(x) for x in lines]) if lines else pd.DataFrame(columns=["item_name","qty"])
+            if not ldf.empty:
+                ldf = ldf.rename(columns={"item_name": "Item", "qty": "Qty"})
+                st.dataframe(ldf[["Item","Qty"]], use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # Update status
+            current_status = r["status"]
+            status_idx = RES_STATUS.index(current_status) if current_status in RES_STATUS else 0
+
+            colS1, colS2 = st.columns([1, 1], gap="large")
+            with colS1:
+                new_status = st.selectbox(
+                    "Update status",
+                    RES_STATUS,
+                    index=status_idx,
+                    key=f"res_status_{rid}"
+                )
+            with colS2:
+                if st.button("Save status", use_container_width=True, key=f"res_save_status_{rid}"):
+                    execute("UPDATE reservations SET status=? WHERE id=?", (new_status, rid))
+                    st.success("Status updated.")
+                    st.rerun()
+
+            # Convert to checkout
+            if r.get("checkout_id"):
+                st.info(f"Already converted to Ticket #{r['checkout_id']}.")
+                pdf_bytes = build_ticket_pdf(int(r["checkout_id"]))
+                st.download_button(
+                    "Download / Print Ticket (PDF)",
+                    data=pdf_bytes,
+                    file_name=f"ticket_{int(r['checkout_id'])}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"res_print_converted_{rid}"
+                )
+                continue
+
+            if current_status != "ready":
+                st.warning("To convert to a real checkout, set status to **ready** first.")
+                continue
+
+            st.subheader("Convert to Checkout (creates a real ticket)")
+            colC1, colC2 = st.columns(2, gap="large")
+            with colC1:
+                actual_checkout_date = st.date_input(
+                    "Actual checkout date",
+                    value=date.today(),
+                    key=f"res_actual_date_{rid}"
+                )
+            with colC2:
+                use_actual_time = st.checkbox(
+                    "Record actual checkout time (optional)",
+                    value=False,
+                    key=f"res_use_actual_time_{rid}"
+                )
+                actual_time_str = None
+                if use_actual_time:
+                    t2 = st.time_input(
+                        "Actual checkout time",
+                        value=datetime.now().time().replace(second=0, microsecond=0),
+                        key=f"res_actual_time_{rid}"
+                    )
+                    actual_time_str = t2.strftime("%H:%M")
+
+            if st.button("Convert reservation to checkout", type="primary", use_container_width=True, key=f"res_convert_{rid}"):
+                # Pull full reservation header + lines fresh
+                header = fetch_one("SELECT * FROM reservations WHERE id=?", (rid,))
+                if not header:
+                    st.error("Reservation not found.")
+                    return
+                lines = get_reservation_lines(rid)
+                if not lines:
+                    st.error("Reservation has no items.")
+                    return
+
+                # Validate availability NOW (since reservation doesn't reserve stock)
+                for ln in lines:
+                    need = int(ln["qty"] or 0)
+                    avail = get_available_qty(int(ln["item_id"]))
+                    if need > avail:
+                        st.error(f"Not enough available for: {ln['item_name']} (need {need}, available {avail})")
+                        return
+
+                checkout_id = execute("""
+                    INSERT INTO checkouts (
+                        checkout_date, expected_return_date,
+                        borrower_name, borrower_email, borrower_group,
+                        created_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    actual_checkout_date.isoformat(),
+                    header["expected_return_date"],
+                    header["borrower_name"],
+                    header["borrower_email"],
+                    header["borrower_group"],
+                    st.session_state.user_id,
+                    now_iso()
+                ))
+
+                params = []
+                for ln in lines:
+                    params.append((checkout_id, int(ln["item_id"]), int(ln["qty"])))
+                execute_many("""
+                    INSERT INTO checkout_lines (checkout_id, item_id, qty)
+                    VALUES (?, ?, ?)
+                """, params)
+
+                # Mark reservation converted + store actual checkout date/time + link ticket
+                execute("""
+                    UPDATE reservations
+                    SET status='converted',
+                        actual_checkout_date=?,
+                        actual_checkout_time=?,
+                        checkout_id=?
+                    WHERE id=?
+                """, (actual_checkout_date.isoformat(), actual_time_str, checkout_id, rid))
+
+                pdf_bytes = build_checkout_receipt_pdf(checkout_id)
+                st.session_state.last_converted_reservation = {
+                    "reservation_id": rid,
+                    "checkout_id": checkout_id,
+                    "pdf_bytes": pdf_bytes
+                }
+                st.rerun()
 
 # ---------------------------
 # App Shell
@@ -1340,7 +1779,7 @@ def main():
         st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
         st.divider()
 
-        pages = ["Checkout", "Check In", "Currently Checked Out", "Items", "Categories", "Reports"]
+        pages = ["Checkout", "Reservations", "Check In", "Currently Checked Out", "Items", "Categories", "Reports"]
         if is_admin():
             pages.insert(0, "Admin: Users")
         pages.append("Logout")
@@ -1363,6 +1802,8 @@ def main():
         page_reports()
     elif choice == "Logout":
         page_logout()
+    elif choice == "Reservations":
+        page_reservations()
 
 if __name__ == "__main__":
     main()
