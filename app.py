@@ -1445,7 +1445,7 @@ def page_reservations():
         colA, colB = st.columns(2, gap="large")
 
         with colA:
-            r_name = st.text_input("Estimated name", key="res_name")
+            r_name = st.text_input("Name", key="res_name")
             r_email = st.text_input("Email", key="res_email")
             r_group = st.text_input("Group / organization", key="res_group")
 
@@ -1520,7 +1520,7 @@ def page_reservations():
 
         if st.button("Create reservation", type="primary", use_container_width=True):
             if not r_name.strip():
-                st.error("Estimated name is required.")
+                st.error("Name is required.")
                 return
             if not r_email.strip():
                 st.error("Email is required.")
