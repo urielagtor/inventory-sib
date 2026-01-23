@@ -6,7 +6,7 @@ import secrets
 from datetime import date, datetime
 import pandas as pd
 
-# ✅ PDF for printable receipt + reports
+# ✅ PDF
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -73,7 +73,11 @@ def reset_admin_password_to_default():
 # ---------------------------
 # PDF helpers
 # ---------------------------
-def build_table_pdf(title: str, subtitle_lines: list[str], df: pd.DataFrame) -> bytes:
+def build_table_pdf(title: str, subtitle_lines: list[str], table_data, col_widths=None) -> bytes:
+    """
+    table_data should be a list of rows (including header row),
+    where cells can be strings or ReportLab Paragraphs.
+    """
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
@@ -86,18 +90,17 @@ def build_table_pdf(title: str, subtitle_lines: list[str], df: pd.DataFrame) -> 
         story.append(Paragraph(line, styles["Normal"]))
     story.append(Spacer(1, 12))
 
-    if df is None or df.empty:
+    if not table_data or len(table_data) <= 1:
         story.append(Paragraph("No records found.", styles["Normal"]))
         doc.build(story)
         return buffer.getvalue()
 
-    data = [list(df.columns)] + df.astype(str).values.tolist()
-    table = Table(data, repeatRows=1)
+    table = Table(table_data, repeatRows=1, colWidths=col_widths)
 
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
@@ -113,12 +116,19 @@ def build_table_pdf(title: str, subtitle_lines: list[str], df: pd.DataFrame) -> 
     buffer.close()
     return pdf_bytes
 
-def build_checkout_receipt_pdf(checkout_id: int) -> bytes:
+def build_ticket_pdf(checkout_id: int) -> bytes:
+    """
+    Printable PDF for ANY ticket (open or closed),
+    includes return log per line.
+    """
+    styles = getSampleStyleSheet()
+
     header = fetch_one("""
         SELECT
             co.id AS checkout_id,
             co.checkout_date,
             co.expected_return_date,
+            co.actual_return_date,
             co.borrower_name,
             co.borrower_email,
             co.borrower_group,
@@ -129,32 +139,87 @@ def build_checkout_receipt_pdf(checkout_id: int) -> bytes:
         WHERE co.id = ?
     """, (checkout_id,))
     if not header:
-        return build_table_pdf("Checkout Receipt", [f"Checkout #{checkout_id}", "Not found."], pd.DataFrame())
+        return build_table_pdf(
+            "Ticket",
+            [f"Ticket #{checkout_id}", "Not found."],
+            [["Message"], ["Ticket not found."]]
+        )
 
+    # Lines (include returned/outstanding)
     lines = fetch_all("""
         SELECT
+            cl.id AS line_id,
             i.name AS item_name,
-            cl.qty AS qty
+            cl.qty,
+            cl.returned_qty,
+            (cl.qty - cl.returned_qty) AS outstanding_qty
         FROM checkout_lines cl
         JOIN items i ON i.id = cl.item_id
         WHERE cl.checkout_id = ?
         ORDER BY i.name ASC
     """, (checkout_id,))
 
-    df = pd.DataFrame([dict(r) for r in lines]) if lines else pd.DataFrame(columns=["item_name", "qty"])
-    if not df.empty:
-        df = df.rename(columns={"item_name": "Item", "qty": "Qty"})
+    # Return events (audit log)
+    events = fetch_all("""
+        SELECT
+            re.line_id,
+            re.qty AS returned_qty,
+            re.returned_at,
+            u.username AS returned_by
+        FROM return_events re
+        JOIN users u ON u.id = re.returned_by
+        WHERE re.checkout_id = ?
+        ORDER BY re.returned_at ASC, re.id ASC
+    """, (checkout_id,))
+
+    # Map line_id -> list of "when by who: qty"
+    ev_map = {}
+    for e in events:
+        lid = int(e["line_id"])
+        when = str(e["returned_at"])
+        who = str(e["returned_by"])
+        qty = int(e["returned_qty"] or 0)
+        ev_map.setdefault(lid, []).append(f"{when} — {who} — qty {qty}")
 
     subtitle = [
-        f"Checkout #: {header['checkout_id']}",
+        f"Ticket #: {header['checkout_id']}",
         f"Borrower: {header['borrower_name']} ({header['borrower_email']})",
         f"Group: {header['borrower_group']}",
         f"Checkout date: {header['checkout_date']}    Expected return: {header['expected_return_date']}",
         f"Recorded by: {header['created_by']}    Created at: {header['created_at']}",
+        f"Actual return date: {header['actual_return_date'] or '(not fully returned yet)'}",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
     ]
 
-    return build_table_pdf("Checkout Receipt", subtitle, df)
+    # Build table rows with wrapped "Return Log"
+    table_data = [[
+        "Line ID", "Item", "Qty Out", "Returned", "Outstanding", "Return Log (who/when/qty)"
+    ]]
+
+    for r in lines:
+        lid = int(r["line_id"])
+        log_lines = ev_map.get(lid, [])
+        log_text = "<br/>".join(log_lines) if log_lines else "(no returns recorded)"
+        table_data.append([
+            str(lid),
+            str(r["item_name"]),
+            str(int(r["qty"] or 0)),
+            str(int(r["returned_qty"] or 0)),
+            str(int(r["outstanding_qty"] or 0)),
+            Paragraph(log_text, styles["Normal"]),
+        ])
+
+    # column widths tuned for letter page
+    col_widths = [45, 140, 45, 50, 60, 200]
+
+    return build_table_pdf("Ticket", subtitle, table_data, col_widths=col_widths)
+
+def build_checkout_receipt_pdf(checkout_id: int) -> bytes:
+    """
+    Keep this for the "Checkout Receipt" button — uses ticket PDF format,
+    but it’ll naturally show empty return logs initially.
+    """
+    return build_ticket_pdf(checkout_id)
 
 # ---------------------------
 # Database
@@ -245,8 +310,25 @@ def init_db():
         )
     """)
 
+    # ✅ Audit log of check-ins (who, when, qty) per line
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS return_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkout_id INTEGER NOT NULL,
+            line_id INTEGER NOT NULL,
+            qty INTEGER NOT NULL,
+            returned_at TEXT NOT NULL,
+            returned_by INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(checkout_id) REFERENCES checkouts(id),
+            FOREIGN KEY(line_id) REFERENCES checkout_lines(id),
+            FOREIGN KEY(returned_by) REFERENCES users(id)
+        )
+    """)
+
     conn.commit()
 
+    # Create default admin if none exists
     cur.execute("SELECT COUNT(*) as c FROM users WHERE role='admin'")
     if cur.fetchone()["c"] == 0:
         default_user = "admin"
@@ -329,7 +411,7 @@ def get_available_qty(item_id: int) -> int:
     return max(total - outstanding, 0)
 
 # ---------------------------
-# Ticket helpers (open checkouts)
+# Ticket helpers
 # ---------------------------
 def get_open_checkouts_summary(limit: int = 500):
     rows = fetch_all(f"""
@@ -692,26 +774,16 @@ def page_checkout():
 
     if st.session_state.last_checkout_receipt:
         rec = st.session_state.last_checkout_receipt
-        st.success(f"Checkout submitted successfully! Receipt ready for Checkout #{rec['checkout_id']}.")
+        st.success(f"Checkout submitted successfully! Receipt ready for Ticket #{rec['checkout_id']}.")
 
         st.download_button(
-            "Download / Print Receipt (PDF)",
+            "Download / Print Ticket (PDF)",
             data=rec["pdf_bytes"],
-            file_name=f"checkout_receipt_{rec['checkout_id']}.pdf",
+            file_name=f"ticket_{rec['checkout_id']}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
         st.caption("Tip: Open the downloaded PDF and print it from your browser/PDF viewer.")
-
-        preview_lines = fetch_all("""
-            SELECT i.name AS item, cl.qty
-            FROM checkout_lines cl
-            JOIN items i ON i.id = cl.item_id
-            WHERE cl.checkout_id = ?
-            ORDER BY i.name ASC
-        """, (rec["checkout_id"],))
-        prev_df = pd.DataFrame([dict(r) for r in preview_lines]) if preview_lines else pd.DataFrame(columns=["item", "qty"])
-        st.dataframe(prev_df, use_container_width=True, hide_index=True)
 
         colA, colB = st.columns([1, 1], gap="large")
         with colA:
@@ -737,7 +809,7 @@ def page_checkout():
         label = f"{it['name']} (available: {avail} / total: {total})"
         item_options.append((it["id"], label, avail))
 
-    st.caption("Build a checkout cart (multiple items), then submit as one checkout record.")
+    st.caption("Build a checkout cart (multiple items), then submit as one ticket.")
 
     if "cart" not in st.session_state:
         st.session_state.cart = []
@@ -873,11 +945,10 @@ def page_checkout():
         st.session_state.last_checkout_receipt = {
             "checkout_id": checkout_id,
             "pdf_bytes": pdf_bytes,
-            "borrower_email": borrower_email.strip(),
         }
 
         st.session_state.cart = []
-        st.success(f"Checkout submitted (ID: {checkout_id}). Receipt generated.")
+        st.success(f"Checkout submitted (Ticket #: {checkout_id}). Ticket PDF generated.")
         st.rerun()
 
 def page_currently_checked_out():
@@ -925,6 +996,17 @@ def page_currently_checked_out():
                     "outstanding_qty": "Qty Not Checked In"
                 })
             st.dataframe(ldf, use_container_width=True, hide_index=True)
+
+            # Optional: print open ticket from here too
+            pdf_bytes = build_ticket_pdf(ticket_id)
+            st.download_button(
+                "Download / Print Ticket (PDF)",
+                data=pdf_bytes,
+                file_name=f"ticket_{ticket_id}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"print_open_ticket_{ticket_id}"
+            )
 
 def page_checkin():
     require_login()
@@ -984,6 +1066,16 @@ def page_checkin():
 
     if header["actual_return_date"]:
         st.info(f"Ticket #{ticket_id} is already CLOSED (Actual return: {header['actual_return_date']}).")
+        # Still allow printing closed ticket
+        pdf_bytes = build_ticket_pdf(ticket_id)
+        st.download_button(
+            "Download / Print Ticket (PDF)",
+            data=pdf_bytes,
+            file_name=f"ticket_{ticket_id}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key=f"print_closed_from_checkin_{ticket_id}"
+        )
         return
 
     st.subheader(f"Ticket #{ticket_id}")
@@ -1076,6 +1168,7 @@ def page_checkin():
 
         returned_at_iso = datetime.combine(actual_return, datetime.min.time()).isoformat()
 
+        # ✅ Update returned_qty AND write return_events for audit ("who checked in and when")
         for return_now, line_id in updates:
             execute("""
                 UPDATE checkout_lines
@@ -1083,6 +1176,11 @@ def page_checkin():
                     returned_at = ?
                 WHERE id = ?
             """, (return_now, returned_at_iso, line_id))
+
+            execute("""
+                INSERT INTO return_events (checkout_id, line_id, qty, returned_at, returned_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (ticket_id, line_id, return_now, returned_at_iso, st.session_state.user_id, now_iso()))
 
         remain = fetch_one("""
             SELECT SUM(qty - returned_qty) AS remain
@@ -1101,12 +1199,45 @@ def page_checkin():
         else:
             st.success(f"Return processed. Ticket #{ticket_id} remains OPEN — {remain_qty} still outstanding.")
 
+        # Offer a fresh PDF immediately after return
+        pdf_bytes = build_ticket_pdf(ticket_id)
+        st.download_button(
+            "Download / Print Updated Ticket (PDF)",
+            data=pdf_bytes,
+            file_name=f"ticket_{ticket_id}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key=f"print_updated_ticket_after_checkin_{ticket_id}"
+        )
+
         st.rerun()
 
 def page_reports():
     require_login()
     st.header("Reports")
 
+    st.subheader("Print ticket (open or closed)")
+    ticket_to_print = st.text_input("Ticket # to print", value="", key="report_ticket_print").strip()
+    if ticket_to_print:
+        if not ticket_to_print.isdigit():
+            st.error("Ticket # must be a number.")
+        else:
+            tid = int(ticket_to_print)
+            header = fetch_one("SELECT id FROM checkouts WHERE id=?", (tid,))
+            if not header:
+                st.error(f"Ticket #{tid} not found.")
+            else:
+                pdf_bytes = build_ticket_pdf(tid)
+                st.download_button(
+                    "Download / Print Ticket (PDF)",
+                    data=pdf_bytes,
+                    file_name=f"ticket_{tid}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key=f"report_print_ticket_{tid}"
+                )
+
+    st.divider()
     st.subheader("Inventory snapshot")
     rows = fetch_all("""
         SELECT i.id, i.name, i.total_qty, c.name AS category
