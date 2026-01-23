@@ -278,6 +278,135 @@ def get_available_qty(item_id: int) -> int:
     outstanding = get_outstanding_by_item().get(item_id, 0)
     return max(total - outstanding, 0)
 
+#----------------------------
+# BORROWER RECEIPT
+#----------------------------
+
+def build_receipt_pdf(borrower_name: str, borrower_email: str, rows: list[sqlite3.Row]) -> bytes:
+    """
+    rows: result of the receipt query (outstanding items by borrower)
+    Returns PDF bytes.
+    """
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+
+    y = height - 72
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(72, y, "Supply Checkout Receipt (Outstanding Items)")
+    y -= 22
+
+    c.setFont("Helvetica", 10)
+    c.drawString(72, y, f"Borrower: {borrower_name}")
+    y -= 14
+    if borrower_email:
+        c.drawString(72, y, f"Email: {borrower_email}")
+        y -= 14
+    c.drawString(72, y, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    y -= 22
+
+    # Table header
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(72, y, "Checkout #")
+    c.drawString(140, y, "Checkout date")
+    c.drawString(220, y, "Expected return")
+    c.drawString(320, y, "Item")
+    c.drawRightString(540, y, "Outstanding")
+    y -= 12
+    c.line(72, y, 540, y)
+    y -= 14
+
+    c.setFont("Helvetica", 9)
+
+    for r in rows:
+        # New page if needed
+        if y < 72:
+            c.showPage()
+            y = height - 72
+            c.setFont("Helvetica", 9)
+
+        c.drawString(72, y, str(r["checkout_id"]))
+        c.drawString(140, y, str(r["checkout_date"]))
+        c.drawString(220, y, str(r["expected_return_date"]))
+        c.drawString(320, y, (r["item_name"] or "")[:30])
+        c.drawRightString(540, y, str(r["outstanding_qty"]))
+        y -= 14
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def page_borrower_receipt():
+    require_login()
+    st.header("Borrower Receipt")
+
+    st.caption("Look up what a borrower currently has checked out and download a printable receipt.")
+
+    col1, col2 = st.columns([2, 2], gap="large")
+    with col1:
+        borrower_name = st.text_input("Borrower name (exact match is best)", key="receipt_borrower_name")
+    with col2:
+        borrower_email = st.text_input("Borrower email (optional but recommended)", key="receipt_borrower_email")
+
+    # If email is provided, use it as the primary key (more reliable than names)
+    if st.button("Find outstanding items", type="primary", use_container_width=True):
+        if not borrower_name.strip() and not borrower_email.strip():
+            st.error("Enter at least a borrower name or email.")
+            return
+
+        params = []
+        where = []
+        if borrower_email.strip():
+            where.append("LOWER(co.borrower_email) = LOWER(?)")
+            params.append(borrower_email.strip())
+        if borrower_name.strip():
+            where.append("LOWER(co.borrower_name) = LOWER(?)")
+            params.append(borrower_name.strip())
+
+        # Find all outstanding lines for this borrower
+        rows = fetch_all(f"""
+            SELECT
+                co.id AS checkout_id,
+                co.checkout_date,
+                co.expected_return_date,
+                co.borrower_name,
+                co.borrower_email,
+                co.borrower_group,
+                i.name AS item_name,
+                (cl.qty - cl.returned_qty) AS outstanding_qty
+            FROM checkout_lines cl
+            JOIN checkouts co ON co.id = cl.checkout_id
+            JOIN items i ON i.id = cl.item_id
+            WHERE (cl.qty - cl.returned_qty) > 0
+              AND ({' AND '.join(where)})
+            ORDER BY co.checkout_date DESC, co.id DESC, i.name ASC
+        """, tuple(params))
+
+        if not rows:
+            st.success("No outstanding items found for that borrower.")
+            return
+
+        # Show on screen
+        df = pd.DataFrame([dict(r) for r in rows])[
+            ["checkout_id", "checkout_date", "expected_return_date", "borrower_name", "borrower_email", "borrower_group", "item_name", "outstanding_qty"]
+        ]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # Build PDF
+        display_name = rows[0]["borrower_name"] or borrower_name.strip()
+        display_email = rows[0]["borrower_email"] or borrower_email.strip()
+        pdf_bytes = build_receipt_pdf(display_name, display_email, rows)
+
+        st.download_button(
+            label="Download printable PDF receipt",
+            data=pdf_bytes,
+            file_name=f"checkout_receipt_{display_name.replace(' ', '_')}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+
+
 # ---------------------------
 # UI Pages
 # ---------------------------
@@ -962,7 +1091,8 @@ def main():
         st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
         st.divider()
 
-        pages = ["Checkout", "Currently Checked Out", "Items", "Categories", "Reports"]
+        pages = ["Checkout", "Currently Checked Out", "Borrower Receipt", "Items", "Categories", "Reports"]
+
         if is_admin():
             pages.insert(0, "Admin: Users")
         pages.append("Logout")
@@ -980,6 +1110,8 @@ def main():
         page_checkout()
     elif choice == "Currently Checked Out":
         page_checked_out()
+    elif choice == "Borrower Receipt":
+ 	page_borrower_receipt()
     elif choice == "Reports":
         page_reports()
     elif choice == "Logout":
