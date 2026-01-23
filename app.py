@@ -888,7 +888,23 @@ def main():
         page_login()
         return
 
+       # Sidebar navigation
     with st.sidebar:
+        render_sidebar_logo()  # ✅ theme-aware logo at top
+
+        st.markdown(f"### {APP_TITLE}")
+        st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
+        st.divider()
+
+        pages = ["Checkout", "Currently Checked Out", "Items", "Categories", "Reports"]
+        if is_admin():
+            pages.insert(0, "Admin: Users")
+        pages.append("Logout")
+
+        choice = st.radio("Navigation", pages, label_visibility="collapsed")
+
+
+
         st.markdown(f"### {APP_TITLE}")
         st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
         st.divider()
