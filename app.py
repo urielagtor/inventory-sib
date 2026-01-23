@@ -242,7 +242,7 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
-APP_TZ = ZoneInfo("America/Los_Angeles")
+
 
 def init_db():
     conn = get_conn()
@@ -385,13 +385,16 @@ def require_login():
         st.warning("Please log in to continue.")
         st.stop()
 
+from zoneinfo import ZoneInfo
+from datetime import date, datetime, timezone
+
+APP_TZ = ZoneInfo("America/Los_Angeles")
+
 def now_iso():
-    # Store UTC timestamps in DB (Python 3.8+ compatible)
+    # Store all timestamps in UTC
     return datetime.now(timezone.utc).isoformat()
+
 def to_local_display(dt_str: str) -> str:
-    """
-    Convert stored ISO timestamp (UTC) into America/Los_Angeles for display.
-    """
     if not dt_str:
         return ""
     try:
@@ -403,12 +406,11 @@ def to_local_display(dt_str: str) -> str:
         return str(dt_str)
 
 def local_returned_at_iso(d: date) -> str:
-    """
-    Convert a date picker value into an ISO timestamp at midnight in America/Los_Angeles,
-    then store it as UTC in the DB.
-    """
+    # Midnight in America/Los_Angeles -> converted to UTC for storage
     local_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=APP_TZ)
-    return local_dt.astimezone(tzinfo=timezone.utc).isoformat()
+    return local_dt.astimezone(timezone.utc).isoformat()
+
+
 
 
 # ---------------------------
