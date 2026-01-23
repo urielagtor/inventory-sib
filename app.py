@@ -1111,7 +1111,7 @@ def main():
     elif choice == "Currently Checked Out":
         page_checked_out()
     elif choice == "Borrower Receipt":
- 	page_borrower_receipt()
+ 	    page_borrower_receipt()
     elif choice == "Reports":
         page_reports()
     elif choice == "Logout":
