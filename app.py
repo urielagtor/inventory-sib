@@ -74,10 +74,6 @@ def reset_admin_password_to_default():
 # PDF helpers
 # ---------------------------
 def build_table_pdf(title: str, subtitle_lines: list[str], df: pd.DataFrame) -> bytes:
-    """
-    Generic PDF generator: title + subtitle lines + dataframe as table.
-    Returns PDF bytes.
-    """
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
@@ -118,9 +114,6 @@ def build_table_pdf(title: str, subtitle_lines: list[str], df: pd.DataFrame) -> 
     return pdf_bytes
 
 def build_checkout_receipt_pdf(checkout_id: int) -> bytes:
-    """
-    Builds a printable receipt PDF for a single checkout_id.
-    """
     header = fetch_one("""
         SELECT
             co.id AS checkout_id,
@@ -336,6 +329,45 @@ def get_available_qty(item_id: int) -> int:
     return max(total - outstanding, 0)
 
 # ---------------------------
+# Ticket helpers (open checkouts)
+# ---------------------------
+def get_open_checkouts_summary(limit: int = 500):
+    rows = fetch_all(f"""
+        SELECT
+            co.id AS checkout_id,
+            co.borrower_name,
+            co.borrower_email,
+            co.borrower_group,
+            co.checkout_date,
+            co.expected_return_date,
+            SUM(cl.qty - cl.returned_qty) AS outstanding_total
+        FROM checkouts co
+        JOIN checkout_lines cl ON cl.checkout_id = co.id
+        GROUP BY co.id
+        HAVING SUM(cl.qty - cl.returned_qty) > 0
+        ORDER BY co.checkout_date DESC, co.id DESC
+        LIMIT {int(limit)}
+    """)
+    return rows
+
+def get_open_checkout_ids(limit: int = 500):
+    rows = get_open_checkouts_summary(limit=limit)
+    return [int(r["checkout_id"]) for r in rows]
+
+def get_checkout_outstanding_lines(checkout_id: int):
+    return fetch_all("""
+        SELECT
+            cl.id AS line_id,
+            i.name AS item_name,
+            (cl.qty - cl.returned_qty) AS outstanding_qty
+        FROM checkout_lines cl
+        JOIN items i ON i.id = cl.item_id
+        WHERE cl.checkout_id = ?
+          AND (cl.qty - cl.returned_qty) > 0
+        ORDER BY i.name ASC
+    """, (checkout_id,))
+
+# ---------------------------
 # UI Pages
 # ---------------------------
 def page_login():
@@ -385,7 +417,6 @@ def page_admin_users():
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.divider()
-
     col1, col2 = st.columns(2, gap="large")
 
     with col1:
@@ -419,8 +450,11 @@ def page_admin_users():
             st.info("No users found.")
             return
 
-        selected_id = st.selectbox("Select user", options=[x[0] for x in user_options],
-                                   format_func=lambda uid: dict(user_options).get(uid, str(uid)))
+        selected_id = st.selectbox(
+            "Select user",
+            options=[x[0] for x in user_options],
+            format_func=lambda uid: dict(user_options).get(uid, str(uid))
+        )
         selected = fetch_one("SELECT * FROM users WHERE id=?", (selected_id,))
         if not selected:
             st.warning("User not found.")
@@ -466,7 +500,6 @@ def page_categories():
     st.dataframe(cat_df, use_container_width=True, hide_index=True)
 
     st.divider()
-
     col1, col2 = st.columns(2, gap="large")
 
     with col1:
@@ -559,7 +592,6 @@ def page_items():
     st.dataframe(df, use_container_width=True, hide_index=True)
 
     st.divider()
-
     col1, col2 = st.columns(2, gap="large")
 
     with col1:
@@ -655,9 +687,8 @@ def page_checkout():
     require_login()
     st.header("Checkout Supplies")
 
-    # ✅ If we just submitted a checkout, show the receipt right at the top
     if "last_checkout_receipt" not in st.session_state:
-        st.session_state.last_checkout_receipt = None  # dict: {checkout_id, pdf_bytes, borrower_email}
+        st.session_state.last_checkout_receipt = None
 
     if st.session_state.last_checkout_receipt:
         rec = st.session_state.last_checkout_receipt
@@ -672,7 +703,6 @@ def page_checkout():
         )
         st.caption("Tip: Open the downloaded PDF and print it from your browser/PDF viewer.")
 
-        # Show a quick preview table from the DB
         preview_lines = fetch_all("""
             SELECT i.name AS item, cl.qty
             FROM checkout_lines cl
@@ -809,7 +839,6 @@ def page_checkout():
             st.error("Add at least one item to the cart.")
             return
 
-        # Re-check availability at submit time
         for c in st.session_state.cart:
             avail = get_available_qty(c["item_id"])
             if c["qty"] > avail:
@@ -840,7 +869,6 @@ def page_checkout():
             VALUES (?, ?, ?)
         """, params)
 
-        # ✅ Build receipt PDF from DB and show it at top on rerun
         pdf_bytes = build_checkout_receipt_pdf(checkout_id)
         st.session_state.last_checkout_receipt = {
             "checkout_id": checkout_id,
@@ -848,66 +876,92 @@ def page_checkout():
             "borrower_email": borrower_email.strip(),
         }
 
-        # Clear cart after submit
         st.session_state.cart = []
         st.success(f"Checkout submitted (ID: {checkout_id}). Receipt generated.")
         st.rerun()
-def get_open_checkout_ids():
-    """
-    Returns a list of checkout IDs that still have something outstanding.
-    """
-    rows = fetch_all("""
-        SELECT co.id AS checkout_id
-        FROM checkouts co
-        JOIN checkout_lines cl ON cl.checkout_id = co.id
-        GROUP BY co.id
-        HAVING SUM(cl.qty - cl.returned_qty) > 0
-        ORDER BY co.id DESC
-        LIMIT 500
-    """)
-    return [int(r["checkout_id"]) for r in rows]
 
-def page_checked_out():
+def page_currently_checked_out():
     require_login()
-    st.header("Check In (Returns)")
+    st.header("Currently Checked Out")
 
-    st.caption("Select or type a Checkout ID to process returns. The checkout will close automatically when everything is returned.")
+    tickets = get_open_checkouts_summary(limit=500)
+    if not tickets:
+        st.success("Nothing is currently checked out.")
+        return
 
-    open_ids = get_open_checkout_ids()
+    df = pd.DataFrame([dict(r) for r in tickets])
+    df = df[[
+        "checkout_id",
+        "borrower_name",
+        "borrower_group",
+        "checkout_date",
+        "expected_return_date",
+        "outstanding_total",
+    ]].rename(columns={
+        "checkout_id": "Ticket #",
+        "borrower_name": "Borrower",
+        "borrower_group": "Group",
+        "checkout_date": "Checkout Date",
+        "expected_return_date": "Expected Return",
+        "outstanding_total": "Outstanding (Total)"
+    })
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Ticket details (expand a ticket)")
+
+    for r in tickets:
+        ticket_id = int(r["checkout_id"])
+        outstanding_total = int(r["outstanding_total"] or 0)
+        label = f"Ticket #{ticket_id} — {r['borrower_name']} — {r['borrower_group']} (Outstanding: {outstanding_total})"
+        with st.expander(label, expanded=False):
+            lines = get_checkout_outstanding_lines(ticket_id)
+            ldf = pd.DataFrame([dict(x) for x in lines]) if lines else pd.DataFrame(columns=["line_id","item_name","outstanding_qty"])
+            if not ldf.empty:
+                ldf = ldf.rename(columns={
+                    "line_id": "Line ID",
+                    "item_name": "Item",
+                    "outstanding_qty": "Qty Not Checked In"
+                })
+            st.dataframe(ldf, use_container_width=True, hide_index=True)
+
+def page_checkin():
+    require_login()
+    st.header("Check In")
+    st.caption("Select (or type) a Ticket #. Enter Return Now per item. Ticket closes automatically when fully returned.")
+
+    open_ids = get_open_checkout_ids(limit=500)
 
     colA, colB = st.columns([2, 1], gap="large")
-
     with colA:
         selected_id = None
         if open_ids:
             selected_id = st.selectbox(
-                "Select an open Checkout ID",
+                "Select an open Ticket #",
                 options=[None] + open_ids,
-                format_func=lambda x: "(choose one)" if x is None else f"Checkout #{x}",
-                key="checkin_select_checkout_id"
+                format_func=lambda x: "(choose one)" if x is None else f"Ticket #{x}",
+                key="checkin_select_ticket"
             )
         else:
-            st.info("No open checkouts found.")
+            st.info("No open tickets found.")
 
     with colB:
-        typed_id = st.text_input("Or type a Checkout ID", value="", key="checkin_typed_checkout_id")
-        typed_id = typed_id.strip()
+        typed_id = st.text_input("Or type Ticket #", value="", key="checkin_typed_ticket").strip()
 
-    # Determine which ID to use (typed takes precedence if present)
-    checkout_id = None
+    ticket_id = None
     if typed_id:
         if typed_id.isdigit():
-            checkout_id = int(typed_id)
+            ticket_id = int(typed_id)
         else:
-            st.error("Typed Checkout ID must be a number.")
+            st.error("Typed Ticket # must be a number.")
             return
     elif selected_id is not None:
-        checkout_id = int(selected_id)
+        ticket_id = int(selected_id)
 
-    if not checkout_id:
+    if not ticket_id:
         st.stop()
 
-    # Pull checkout header
     header = fetch_one("""
         SELECT
             co.id AS checkout_id,
@@ -922,68 +976,57 @@ def page_checked_out():
         FROM checkouts co
         JOIN users u ON u.id = co.created_by
         WHERE co.id = ?
-    """, (checkout_id,))
+    """, (ticket_id,))
 
     if not header:
-        st.error(f"Checkout #{checkout_id} not found.")
+        st.error(f"Ticket #{ticket_id} not found.")
         return
 
-    # Pull all lines for this checkout
-    line_rows = fetch_all("""
-        SELECT
-            cl.id AS line_id,
-            i.name AS item_name,
-            cl.qty,
-            cl.returned_qty,
-            (cl.qty - cl.returned_qty) AS outstanding_qty
-        FROM checkout_lines cl
-        JOIN items i ON i.id = cl.item_id
-        WHERE cl.checkout_id = ?
-        ORDER BY i.name ASC
-    """, (checkout_id,))
-
-    if not line_rows:
-        st.warning("No items found on this checkout.")
+    if header["actual_return_date"]:
+        st.info(f"Ticket #{ticket_id} is already CLOSED (Actual return: {header['actual_return_date']}).")
         return
 
-    # Show header info
-    is_closed = bool(header["actual_return_date"])
-    status_text = "CLOSED" if is_closed else "OPEN"
-    status_color = "✅" if is_closed else "🟨"
-
-    st.subheader(f"{status_color} Checkout #{checkout_id} — {status_text}")
+    st.subheader(f"Ticket #{ticket_id}")
     st.write(
         f"**Borrower:** {header['borrower_name']} ({header['borrower_email']})  \n"
         f"**Group:** {header['borrower_group']}  \n"
         f"**Checkout date:** {header['checkout_date']}  \n"
         f"**Expected return:** {header['expected_return_date']}  \n"
         f"**Created by:** {header['created_by']}  \n"
-        f"**Created at:** {header['created_at']}  \n"
-        f"**Actual return date:** {header['actual_return_date'] or '(not fully returned yet)'}"
+        f"**Created at:** {header['created_at']}"
     )
 
-    # Build table for data_editor
-    df = pd.DataFrame([dict(r) for r in line_rows])
+    rows = fetch_all("""
+        SELECT
+            cl.id AS line_id,
+            i.name AS item_name,
+            cl.qty AS qty,
+            cl.returned_qty AS returned,
+            (cl.qty - cl.returned_qty) AS outstanding
+        FROM checkout_lines cl
+        JOIN items i ON i.id = cl.item_id
+        WHERE cl.checkout_id = ?
+        ORDER BY i.name ASC
+    """, (ticket_id,))
+
+    df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame(columns=["line_id","item_name","qty","returned","outstanding"])
+    if df.empty:
+        st.warning("No lines found on this ticket.")
+        return
+
     df = df.rename(columns={
+        "line_id": "Line ID",
         "item_name": "Item",
         "qty": "Qty",
-        "returned_qty": "Returned",
-        "outstanding_qty": "Outstanding",
-        "line_id": "Line ID",
+        "returned": "Returned",
+        "outstanding": "Outstanding",
     })
 
-    # Add editable column for "Return Now"
     if "Return Now" not in df.columns:
         df["Return Now"] = 0
 
-    # If ticket is closed, prevent editing/processing
-    if is_closed:
-        st.info("This checkout is already closed (fully returned).")
-        st.dataframe(df[["Line ID", "Item", "Qty", "Returned", "Outstanding"]], use_container_width=True, hide_index=True)
-        return
-
     st.divider()
-    st.subheader("Return quantities")
+    st.subheader("Enter quantities being returned")
 
     edited = st.data_editor(
         df[["Line ID", "Item", "Qty", "Returned", "Outstanding", "Return Now"]],
@@ -995,84 +1038,70 @@ def page_checked_out():
             "Qty": st.column_config.NumberColumn(disabled=True),
             "Returned": st.column_config.NumberColumn(disabled=True),
             "Outstanding": st.column_config.NumberColumn(disabled=True),
-            "Return Now": st.column_config.NumberColumn(
-                help="Enter how many are being returned right now for this line.",
-                min_value=0,
-                step=1
-            ),
+            "Return Now": st.column_config.NumberColumn(min_value=0, step=1),
         },
         disabled=["Line ID", "Item", "Qty", "Returned", "Outstanding"],
-        key=f"checkin_editor_{checkout_id}"
+        key=f"checkin_editor_{ticket_id}"
     )
 
     col1, col2 = st.columns([1, 2], gap="large")
     with col1:
-        actual_return = st.date_input("Return date for this check-in action", value=date.today(), key=f"checkin_return_date_{checkout_id}")
+        actual_return = st.date_input("Return date", value=date.today(), key=f"checkin_date_{ticket_id}")
     with col2:
-        st.caption("Tip: Enter 0 for lines not being returned today. You can partially return and come back later.")
+        st.caption("Enter 0 for lines not being returned today. Partial returns are allowed.")
 
     if st.button("Process Return", type="primary", use_container_width=True):
-        # Validate and build updates
         updates = []
         for _, row in edited.iterrows():
             line_id = int(row["Line ID"])
             outstanding = int(row["Outstanding"])
-            return_now = row["Return Now"]
-
-            # Coerce return_now safely to int
             try:
-                return_now_int = int(return_now)
+                return_now = int(row["Return Now"])
             except Exception:
-                st.error(f"Invalid return amount for line {line_id}. Must be a number.")
+                st.error("Return Now must be a whole number.")
                 return
 
-            if return_now_int < 0:
+            if return_now < 0:
                 st.error("Return Now cannot be negative.")
                 return
-            if return_now_int > outstanding:
-                st.error(f"Line {line_id}: Return Now ({return_now_int}) exceeds Outstanding ({outstanding}).")
+            if return_now > outstanding:
+                st.error(f"Line {line_id}: Return Now ({return_now}) exceeds Outstanding ({outstanding}).")
                 return
-
-            if return_now_int > 0:
-                updates.append((return_now_int, line_id))
+            if return_now > 0:
+                updates.append((return_now, line_id))
 
         if not updates:
-            st.warning("No returns entered. Set at least one 'Return Now' value greater than 0.")
+            st.warning("No returns entered. Set at least one Return Now > 0.")
             return
 
-        # Apply updates (increment returned_qty)
-        # Do it line-by-line to keep it simple/clear
         returned_at_iso = datetime.combine(actual_return, datetime.min.time()).isoformat()
 
-        for return_now_int, line_id in updates:
+        for return_now, line_id in updates:
             execute("""
                 UPDATE checkout_lines
                 SET returned_qty = returned_qty + ?,
                     returned_at = ?
                 WHERE id = ?
-            """, (return_now_int, returned_at_iso, line_id))
+            """, (return_now, returned_at_iso, line_id))
 
-        # Check remaining outstanding for this checkout
         remain = fetch_one("""
             SELECT SUM(qty - returned_qty) AS remain
             FROM checkout_lines
             WHERE checkout_id = ?
-        """, (checkout_id,))
+        """, (ticket_id,))
         remain_qty = int(remain["remain"] or 0)
 
         if remain_qty == 0:
-            # Close ticket
             execute("""
                 UPDATE checkouts
                 SET actual_return_date = ?
                 WHERE id = ?
-            """, (actual_return.isoformat(), checkout_id))
-            st.success(f"Return processed. Checkout #{checkout_id} is now CLOSED (everything returned).")
+            """, (actual_return.isoformat(), ticket_id))
+            st.success(f"Ticket #{ticket_id} CLOSED — everything returned.")
         else:
-            st.success(f"Return processed. Checkout #{checkout_id} remains OPEN — {remain_qty} item(s) still outstanding.")
+            st.success(f"Return processed. Ticket #{ticket_id} remains OPEN — {remain_qty} still outstanding.")
 
         st.rerun()
-
 
 def page_reports():
     require_login()
@@ -1154,7 +1183,7 @@ def main():
         st.write(f"Logged in as **{st.session_state.username}** ({st.session_state.role})")
         st.divider()
 
-        pages = ["Checkout", "Currently Checked Out", "Items", "Categories", "Reports"]
+        pages = ["Checkout", "Check In", "Currently Checked Out", "Items", "Categories", "Reports"]
         if is_admin():
             pages.insert(0, "Admin: Users")
         pages.append("Logout")
@@ -1169,8 +1198,10 @@ def main():
         page_items()
     elif choice == "Checkout":
         page_checkout()
+    elif choice == "Check In":
+        page_checkin()
     elif choice == "Currently Checked Out":
-        page_checked_out()
+        page_currently_checked_out()
     elif choice == "Reports":
         page_reports()
     elif choice == "Logout":
