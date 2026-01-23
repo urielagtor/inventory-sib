@@ -397,7 +397,7 @@ def to_local_display(dt_str: str) -> str:
     try:
         dt = datetime.fromisoformat(dt_str)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(APP_TZ).strftime("%Y-%m-%d %I:%M %p")
     except Exception:
         return str(dt_str)
