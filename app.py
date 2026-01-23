@@ -852,122 +852,227 @@ def page_checkout():
         st.session_state.cart = []
         st.success(f"Checkout submitted (ID: {checkout_id}). Receipt generated.")
         st.rerun()
+def get_open_checkout_ids():
+    """
+    Returns a list of checkout IDs that still have something outstanding.
+    """
+    rows = fetch_all("""
+        SELECT co.id AS checkout_id
+        FROM checkouts co
+        JOIN checkout_lines cl ON cl.checkout_id = co.id
+        GROUP BY co.id
+        HAVING SUM(cl.qty - cl.returned_qty) > 0
+        ORDER BY co.id DESC
+        LIMIT 500
+    """)
+    return [int(r["checkout_id"]) for r in rows]
 
 def page_checked_out():
     require_login()
-    st.header("Currently Checked Out")
+    st.header("Check In (Returns)")
 
-    rows = fetch_all("""
+    st.caption("Select or type a Checkout ID to process returns. The checkout will close automatically when everything is returned.")
+
+    open_ids = get_open_checkout_ids()
+
+    colA, colB = st.columns([2, 1], gap="large")
+
+    with colA:
+        selected_id = None
+        if open_ids:
+            selected_id = st.selectbox(
+                "Select an open Checkout ID",
+                options=[None] + open_ids,
+                format_func=lambda x: "(choose one)" if x is None else f"Checkout #{x}",
+                key="checkin_select_checkout_id"
+            )
+        else:
+            st.info("No open checkouts found.")
+
+    with colB:
+        typed_id = st.text_input("Or type a Checkout ID", value="", key="checkin_typed_checkout_id")
+        typed_id = typed_id.strip()
+
+    # Determine which ID to use (typed takes precedence if present)
+    checkout_id = None
+    if typed_id:
+        if typed_id.isdigit():
+            checkout_id = int(typed_id)
+        else:
+            st.error("Typed Checkout ID must be a number.")
+            return
+    elif selected_id is not None:
+        checkout_id = int(selected_id)
+
+    if not checkout_id:
+        st.stop()
+
+    # Pull checkout header
+    header = fetch_one("""
         SELECT
             co.id AS checkout_id,
             co.checkout_date,
             co.expected_return_date,
+            co.actual_return_date,
             co.borrower_name,
             co.borrower_email,
             co.borrower_group,
-            co.created_at,
-            u.username AS created_by_username,
-            i.name AS item_name,
+            u.username AS created_by,
+            co.created_at
+        FROM checkouts co
+        JOIN users u ON u.id = co.created_by
+        WHERE co.id = ?
+    """, (checkout_id,))
+
+    if not header:
+        st.error(f"Checkout #{checkout_id} not found.")
+        return
+
+    # Pull all lines for this checkout
+    line_rows = fetch_all("""
+        SELECT
             cl.id AS line_id,
+            i.name AS item_name,
             cl.qty,
             cl.returned_qty,
             (cl.qty - cl.returned_qty) AS outstanding_qty
         FROM checkout_lines cl
-        JOIN checkouts co ON co.id = cl.checkout_id
         JOIN items i ON i.id = cl.item_id
-        JOIN users u ON u.id = co.created_by
-        WHERE (cl.qty - cl.returned_qty) > 0
-        ORDER BY co.checkout_date DESC, co.id DESC, i.name ASC
-    """)
+        WHERE cl.checkout_id = ?
+        ORDER BY i.name ASC
+    """, (checkout_id,))
 
-    if not rows:
-        st.success("Nothing is currently checked out.")
+    if not line_rows:
+        st.warning("No items found on this checkout.")
         return
 
-    df = pd.DataFrame([dict(r) for r in rows])
-    df = df[[
-        "checkout_id", "checkout_date", "expected_return_date",
-        "borrower_name", "borrower_email", "borrower_group",
-        "item_name", "outstanding_qty",
-        "created_by_username"
-    ]]
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    # Show header info
+    is_closed = bool(header["actual_return_date"])
+    status_text = "CLOSED" if is_closed else "OPEN"
+    status_color = "✅" if is_closed else "🟨"
+
+    st.subheader(f"{status_color} Checkout #{checkout_id} — {status_text}")
+    st.write(
+        f"**Borrower:** {header['borrower_name']} ({header['borrower_email']})  \n"
+        f"**Group:** {header['borrower_group']}  \n"
+        f"**Checkout date:** {header['checkout_date']}  \n"
+        f"**Expected return:** {header['expected_return_date']}  \n"
+        f"**Created by:** {header['created_by']}  \n"
+        f"**Created at:** {header['created_at']}  \n"
+        f"**Actual return date:** {header['actual_return_date'] or '(not fully returned yet)'}"
+    )
+
+    # Build table for data_editor
+    df = pd.DataFrame([dict(r) for r in line_rows])
+    df = df.rename(columns={
+        "item_name": "Item",
+        "qty": "Qty",
+        "returned_qty": "Returned",
+        "outstanding_qty": "Outstanding",
+        "line_id": "Line ID",
+    })
+
+    # Add editable column for "Return Now"
+    if "Return Now" not in df.columns:
+        df["Return Now"] = 0
+
+    # If ticket is closed, prevent editing/processing
+    if is_closed:
+        st.info("This checkout is already closed (fully returned).")
+        st.dataframe(df[["Line ID", "Item", "Qty", "Returned", "Outstanding"]], use_container_width=True, hide_index=True)
+        return
 
     st.divider()
-    st.subheader("Return items (update actual return date per line)")
+    st.subheader("Return quantities")
 
-    return_rows = fetch_all("""
-        SELECT
-            cl.id AS line_id,
-            co.id AS checkout_id,
-            i.name AS item_name,
-            co.borrower_name,
-            (cl.qty - cl.returned_qty) AS outstanding_qty
-        FROM checkout_lines cl
-        JOIN checkouts co ON co.id = cl.checkout_id
-        JOIN items i ON i.id = cl.item_id
-        WHERE (cl.qty - cl.returned_qty) > 0
-        ORDER BY co.id DESC, i.name ASC
-    """)
-    option_ids = [r["line_id"] for r in return_rows]
-    label_map = {
-        r["line_id"]: f"Checkout #{r['checkout_id']} — {r['item_name']} — {r['borrower_name']} (outstanding: {r['outstanding_qty']})"
-        for r in return_rows
-    }
-    selected_line_id = st.selectbox("Select a checkout line", option_ids, format_func=lambda x: label_map[x])
+    edited = st.data_editor(
+        df[["Line ID", "Item", "Qty", "Returned", "Outstanding", "Return Now"]],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Line ID": st.column_config.NumberColumn(disabled=True),
+            "Item": st.column_config.TextColumn(disabled=True),
+            "Qty": st.column_config.NumberColumn(disabled=True),
+            "Returned": st.column_config.NumberColumn(disabled=True),
+            "Outstanding": st.column_config.NumberColumn(disabled=True),
+            "Return Now": st.column_config.NumberColumn(
+                help="Enter how many are being returned right now for this line.",
+                min_value=0,
+                step=1
+            ),
+        },
+        disabled=["Line ID", "Item", "Qty", "Returned", "Outstanding"],
+        key=f"checkin_editor_{checkout_id}"
+    )
 
-    line = fetch_one("""
-        SELECT cl.id, cl.checkout_id, cl.item_id, cl.qty, cl.returned_qty,
-               co.checkout_date, co.expected_return_date,
-               co.borrower_name, i.name AS item_name
-        FROM checkout_lines cl
-        JOIN checkouts co ON co.id = cl.checkout_id
-        JOIN items i ON i.id = cl.item_id
-        WHERE cl.id=?
-    """, (selected_line_id,))
-    if not line:
-        st.error("Line not found.")
-        return
+    col1, col2 = st.columns([1, 2], gap="large")
+    with col1:
+        actual_return = st.date_input("Return date for this check-in action", value=date.today(), key=f"checkin_return_date_{checkout_id}")
+    with col2:
+        st.caption("Tip: Enter 0 for lines not being returned today. You can partially return and come back later.")
 
-    outstanding = int(line["qty"] - line["returned_qty"])
-    st.write(f"**Selected:** Checkout #{line['checkout_id']} — {line['item_name']} — {line['borrower_name']}")
-    st.write(f"**Outstanding quantity:** {outstanding}")
+    if st.button("Process Return", type="primary", use_container_width=True):
+        # Validate and build updates
+        updates = []
+        for _, row in edited.iterrows():
+            line_id = int(row["Line ID"])
+            outstanding = int(row["Outstanding"])
+            return_now = row["Return Now"]
 
-    with st.form("return_form"):
-        return_qty = st.number_input("Quantity being returned now", min_value=1, max_value=max(1, outstanding), step=1, value=min(1, outstanding))
-        actual_return = st.date_input("Actual return date", value=date.today())
-        submit = st.form_submit_button("Record return")
+            # Coerce return_now safely to int
+            try:
+                return_now_int = int(return_now)
+            except Exception:
+                st.error(f"Invalid return amount for line {line_id}. Must be a number.")
+                return
 
-    if submit:
-        if outstanding <= 0:
-            st.error("Nothing outstanding for this line.")
+            if return_now_int < 0:
+                st.error("Return Now cannot be negative.")
+                return
+            if return_now_int > outstanding:
+                st.error(f"Line {line_id}: Return Now ({return_now_int}) exceeds Outstanding ({outstanding}).")
+                return
+
+            if return_now_int > 0:
+                updates.append((return_now_int, line_id))
+
+        if not updates:
+            st.warning("No returns entered. Set at least one 'Return Now' value greater than 0.")
             return
-        if int(return_qty) > outstanding:
-            st.error("Cannot return more than outstanding.")
-            return
 
-        new_returned = int(line["returned_qty"]) + int(return_qty)
-        execute("""
-            UPDATE checkout_lines
-            SET returned_qty=?, returned_at=?
-            WHERE id=?
-        """, (new_returned, datetime.combine(actual_return, datetime.min.time()).isoformat(), selected_line_id))
+        # Apply updates (increment returned_qty)
+        # Do it line-by-line to keep it simple/clear
+        returned_at_iso = datetime.combine(actual_return, datetime.min.time()).isoformat()
 
+        for return_now_int, line_id in updates:
+            execute("""
+                UPDATE checkout_lines
+                SET returned_qty = returned_qty + ?,
+                    returned_at = ?
+                WHERE id = ?
+            """, (return_now_int, returned_at_iso, line_id))
+
+        # Check remaining outstanding for this checkout
         remain = fetch_one("""
             SELECT SUM(qty - returned_qty) AS remain
             FROM checkout_lines
-            WHERE checkout_id=?
-        """, (line["checkout_id"],))
+            WHERE checkout_id = ?
+        """, (checkout_id,))
         remain_qty = int(remain["remain"] or 0)
+
         if remain_qty == 0:
+            # Close ticket
             execute("""
                 UPDATE checkouts
-                SET actual_return_date=?
-                WHERE id=?
-            """, (actual_return.isoformat(), line["checkout_id"]))
+                SET actual_return_date = ?
+                WHERE id = ?
+            """, (actual_return.isoformat(), checkout_id))
+            st.success(f"Return processed. Checkout #{checkout_id} is now CLOSED (everything returned).")
+        else:
+            st.success(f"Return processed. Checkout #{checkout_id} remains OPEN — {remain_qty} item(s) still outstanding.")
 
-        st.success("Return recorded.")
         st.rerun()
+
 
 def page_reports():
     require_login()
