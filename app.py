@@ -14,7 +14,7 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
-APP_TITLE = "SIB Inventory Supply Checkout System"
+APP_TITLE = "SIB Inventory Supply Checkout System!"
 DB_PATH = "inventory_checkout.db"
 
 # ---------------------------
