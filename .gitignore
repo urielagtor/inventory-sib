@@ -1,0 +1,4 @@
+inventory_checkout.db
+__pycache__/
+*.pyc
+.env
